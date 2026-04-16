@@ -1,31 +1,66 @@
 import type { Database } from "better-sqlite3";
+import type { InferenceSession, Tensor } from "onnxruntime-node";
 
-export type EmbedFn = (text: string, modelVersion: string) => Promise<Float32Array>;
+export type EmbedFn = (
+  text: string,
+  modelVersion: string
+) => Promise<Float32Array>;
+
+type OrtModule = typeof import("onnxruntime-node");
 
 // ---------------------------------------------------------------------------
-// ONNX session cache — one session per model version
+// ONNX session cache - one session per model version
 // ---------------------------------------------------------------------------
 
-// Typed loosely so the file compiles without onnxruntime-node in devDeps.
-// At runtime the dynamic import resolves to the real package.
-const sessionCache = new Map<string, unknown>();
+const sessionCache = new Map<string, InferenceSession>();
 
-async function loadOnnxSession(modelPath: string): Promise<unknown> {
-  if (sessionCache.has(modelPath)) return sessionCache.get(modelPath)!;
-
-  // Dynamic import so onnxruntime-node stays an optional peer dependency.
-  // If not installed this throws a clear error at call time, not at load time.
-  const ort = await import("onnxruntime-node").catch(() => {
+async function loadOrtModule(): Promise<OrtModule> {
+  try {
+    return await import("onnxruntime-node");
+  } catch {
     throw new Error(
       "onnxruntime-node is required for embedding generation. " +
         "Install it: npm install onnxruntime-node"
     );
-  });
+  }
+}
 
-  // @ts-expect-error — ort is typed as unknown above
+async function loadOnnxSession(modelPath: string): Promise<InferenceSession> {
+  const existing = sessionCache.get(modelPath);
+  if (existing !== undefined) {
+    return existing;
+  }
+
+  const ort = await loadOrtModule();
   const session = await ort.InferenceSession.create(modelPath);
   sessionCache.set(modelPath, session);
   return session;
+}
+
+function requireFloatOutputTensor(
+  results: Record<string, Tensor>
+): { data: Float32Array; dims: [number, number, number] } {
+  const outputTensor = results["last_hidden_state"] ?? results["output"];
+
+  if (outputTensor === undefined) {
+    throw new Error(
+      "Embedding model output must expose 'last_hidden_state' or 'output'"
+    );
+  }
+
+  if (!(outputTensor.data instanceof Float32Array)) {
+    throw new Error("Embedding model output tensor must contain Float32 data");
+  }
+
+  const [, seqLen, hiddenSize] = outputTensor.dims;
+  if (seqLen === undefined || hiddenSize === undefined) {
+    throw new Error("Embedding model output tensor must be rank-3");
+  }
+
+  return {
+    data: outputTensor.data,
+    dims: [1, seqLen, hiddenSize],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -45,9 +80,10 @@ export async function generateEmbedding(
   const modelPath =
     process.env.MEMRYON_EMBEDDING_MODEL_PATH ?? `./models/${modelVersion}.onnx`;
 
-  const session = await loadOnnxSession(modelPath);
-
-  const ort = await import("onnxruntime-node");
+  const [ort, session] = await Promise.all([
+    loadOrtModule(),
+    loadOnnxSession(modelPath),
+  ]);
 
   // Minimal tokenisation: byte-encode each character as a token id.
   // Replace with a proper tokenizer (e.g. @xenova/transformers) once available.
@@ -56,29 +92,20 @@ export async function generateEmbedding(
     [...normalized].map((ch) => BigInt(ch.codePointAt(0) ?? 0))
   );
 
-  // @ts-expect-error — session is typed as unknown above
-  const feeds: Record<string, unknown> = {
-    // @ts-expect-error — ort is typed as unknown above
+  const feeds: Record<string, Tensor> = {
     input_ids: new ort.Tensor("int64", tokenIds, [1, tokenIds.length]),
   };
 
-  // @ts-expect-error — session is typed as unknown above
   const results = await session.run(feeds);
-
-  // Expect the model to expose a "last_hidden_state" or "output" tensor.
-  // @ts-expect-error — results is typed as unknown above
-  const outputTensor = results["last_hidden_state"] ?? results["output"];
-
-  // Mean-pool over the sequence dimension to produce a fixed-size vector.
-  // @ts-expect-error — outputTensor is typed as unknown above
-  const raw = outputTensor.data as Float32Array;
-  // @ts-expect-error — outputTensor dims
-  const [, seqLen, hiddenSize] = outputTensor.dims as number[];
+  const { data: raw, dims } = requireFloatOutputTensor(results);
+  const [, seqLen, hiddenSize] = dims;
   const pooled = new Float32Array(hiddenSize);
 
   for (let s = 0; s < seqLen; s++) {
     for (let h = 0; h < hiddenSize; h++) {
-      pooled[h] += raw[s * hiddenSize + h] / seqLen;
+      const current = pooled[h] ?? 0;
+      const value = raw[s * hiddenSize + h] ?? 0;
+      pooled[h] = current + value / seqLen;
     }
   }
 
@@ -112,12 +139,15 @@ export async function reembedMemories(
   db: Database,
   options: ReembedOptions
 ): Promise<ReembedResult> {
-  const { batchSize = 100, newModelVersion, embedFn = generateEmbedding } = options;
+  const {
+    batchSize = 100,
+    newModelVersion,
+    embedFn = generateEmbedding,
+  } = options;
 
   if (!newModelVersion) throw new Error("newModelVersion is required");
   if (batchSize <= 0) throw new Error("batchSize must be positive");
 
-  // Count total that still need re-embedding before we start.
   const totalRow = db
     .prepare<[string], { cnt: number }>(
       `SELECT COUNT(*) AS cnt FROM memories
@@ -133,7 +163,6 @@ export async function reembedMemories(
     return { reembedded_count: 0, remaining: 0 };
   }
 
-  // Fetch this batch.
   const batch = db
     .prepare<[string, number], { id: string; content: string }>(
       `SELECT id, content FROM memories
@@ -145,7 +174,6 @@ export async function reembedMemories(
     )
     .all(newModelVersion, batchSize);
 
-  // Generate embeddings outside the transaction (async).
   const updates: Array<{ id: string; embedding: Buffer }> = [];
 
   for (const row of batch) {
@@ -153,7 +181,6 @@ export async function reembedMemories(
     updates.push({ id: row.id, embedding: Buffer.from(vec.buffer) });
   }
 
-  // Apply all updates atomically.
   const applyUpdates = db.transaction(() => {
     const stmt = db.prepare(
       `UPDATE memories
