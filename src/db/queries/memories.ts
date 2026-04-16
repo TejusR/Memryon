@@ -290,3 +290,14 @@ export function invalidateMemory(
 
   return result.changes > 0;
 }
+
+export function getMemoryById(
+  db: Database,
+  memoryId: string
+): MemoryRow | undefined {
+  if (!memoryId) throw new Error("memoryId is required");
+
+  return db
+    .prepare<[string], MemoryRow>(`SELECT * FROM memories WHERE id = ?`)
+    .get(memoryId);
+}

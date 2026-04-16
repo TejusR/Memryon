@@ -12,6 +12,11 @@ import { handlePromote } from "./tools/promote.js";
 import { handleProjectCreate } from "./tools/project-create.js";
 import { handleProjectJoin } from "./tools/project-join.js";
 import { handleProjectContext } from "./tools/project-context.js";
+import { handleStorePut } from "./tools/store-put.js";
+import { handleStoreGet } from "./tools/store-get.js";
+import { handleStoreSearch } from "./tools/store-search.js";
+import { handleStoreDelete } from "./tools/store-delete.js";
+import { handleStoreListNamespaces } from "./tools/store-list-namespaces.js";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -250,6 +255,140 @@ export function createMcpServer(db: Database): McpServer {
     async (args) => {
       try {
         return ok(handleProjectContext(db, args));
+      } catch (err) {
+        if (isKnownError(err)) return toErrorResult(err);
+        throw err;
+      }
+    }
+  );
+
+  server.registerTool(
+    "store_put",
+    {
+      description:
+        "Store or replace an exact LangGraph-style namespace/key item in Memryon.",
+      inputSchema: {
+        namespace: z.array(z.string().min(1)).min(1).describe("Namespace tuple"),
+        key: z.string().min(1).describe("Exact item key"),
+        value_json: z.record(z.string(), z.unknown()).describe("Exact JSON value"),
+        user_id: z.string().min(1).describe("User context"),
+        agent_id: z.string().min(1).describe("Writing agent"),
+        session_id: z.string().optional().describe("Session identifier"),
+        scope: z.enum(["agent", "project", "global"]).optional().describe("Visibility scope"),
+        project_id: z.string().optional().describe("Required when scope resolves to project"),
+        metadata_json: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe("Optional item metadata"),
+      },
+    },
+    async (args) => {
+      try {
+        return ok(handleStorePut(db, args));
+      } catch (err) {
+        if (isKnownError(err)) return toErrorResult(err);
+        throw err;
+      }
+    }
+  );
+
+  server.registerTool(
+    "store_get",
+    {
+      description: "Fetch an exact LangGraph-style namespace/key item from Memryon.",
+      inputSchema: {
+        namespace: z.array(z.string().min(1)).min(1).describe("Namespace tuple"),
+        key: z.string().min(1).describe("Exact item key"),
+        user_id: z.string().min(1).describe("User context"),
+        agent_id: z.string().min(1).describe("Reading agent"),
+        scope: z.enum(["agent", "project", "global"]).optional().describe("Visibility scope"),
+        project_id: z.string().optional().describe("Project scope identifier"),
+      },
+    },
+    async (args) => {
+      try {
+        return ok(handleStoreGet(db, args));
+      } catch (err) {
+        if (isKnownError(err)) return toErrorResult(err);
+        throw err;
+      }
+    }
+  );
+
+  server.registerTool(
+    "store_search",
+    {
+      description: "Search exact store items under a namespace prefix.",
+      inputSchema: {
+        namespace_prefix: z
+          .array(z.string().min(1))
+          .min(1)
+          .describe("Namespace prefix tuple"),
+        user_id: z.string().min(1).describe("User context"),
+        agent_id: z.string().min(1).describe("Reading agent"),
+        query: z.string().optional().describe("Optional full-text query"),
+        filter_json: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe("Optional exact-match filter on top-level value fields"),
+        limit: z.number().int().min(1).max(500).optional().describe("Result limit"),
+        offset: z.number().int().min(0).optional().describe("Result offset"),
+        scope: z.enum(["agent", "project", "global"]).optional().describe("Visibility scope"),
+        project_id: z.string().optional().describe("Project scope identifier"),
+      },
+    },
+    async (args) => {
+      try {
+        return ok(handleStoreSearch(db, args));
+      } catch (err) {
+        if (isKnownError(err)) return toErrorResult(err);
+        throw err;
+      }
+    }
+  );
+
+  server.registerTool(
+    "store_delete",
+    {
+      description: "Delete an exact store item and invalidate its backing MemCell.",
+      inputSchema: {
+        namespace: z.array(z.string().min(1)).min(1).describe("Namespace tuple"),
+        key: z.string().min(1).describe("Exact item key"),
+        user_id: z.string().min(1).describe("User context"),
+        agent_id: z.string().min(1).describe("Deleting agent"),
+        scope: z.enum(["agent", "project", "global"]).optional().describe("Visibility scope"),
+        project_id: z.string().optional().describe("Project scope identifier"),
+      },
+    },
+    async (args) => {
+      try {
+        return ok(handleStoreDelete(db, args));
+      } catch (err) {
+        if (isKnownError(err)) return toErrorResult(err);
+        throw err;
+      }
+    }
+  );
+
+  server.registerTool(
+    "store_list_namespaces",
+    {
+      description: "List visible store namespaces with optional prefix/suffix filters.",
+      inputSchema: {
+        prefix: z.array(z.string().min(1)).optional().describe("Optional namespace prefix"),
+        suffix: z.array(z.string().min(1)).optional().describe("Optional namespace suffix"),
+        user_id: z.string().min(1).describe("User context"),
+        agent_id: z.string().min(1).describe("Reading agent"),
+        max_depth: z.number().int().min(1).optional().describe("Truncate namespaces to this depth"),
+        limit: z.number().int().min(1).max(500).optional().describe("Result limit"),
+        offset: z.number().int().min(0).optional().describe("Result offset"),
+        scope: z.enum(["agent", "project", "global"]).optional().describe("Visibility scope"),
+        project_id: z.string().optional().describe("Project scope identifier"),
+      },
+    },
+    async (args) => {
+      try {
+        return ok(handleStoreListNamespaces(db, args));
       } catch (err) {
         if (isKnownError(err)) return toErrorResult(err);
         throw err;

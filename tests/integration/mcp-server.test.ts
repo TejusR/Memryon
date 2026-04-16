@@ -503,3 +503,60 @@ describe("corroborate tool", () => {
     expect(corr.corroboration_count).toBe(1);
   });
 });
+
+describe("LangGraph store tools", () => {
+  it("round-trips store_put, store_get, store_search, and store_list_namespaces", async () => {
+    const put = await client.callTool({
+      name: "store_put",
+      arguments: {
+        namespace: ["users", USER, "profile"],
+        key: "prefs",
+        value_json: { favorite_food: "pizza", timezone: "UTC" },
+        user_id: USER,
+        agent_id: AGENT_HI,
+      },
+    });
+
+    expect(put.isError).toBeFalsy();
+    const stored = parseText(put);
+    expect(stored.status).toBe("stored");
+
+    const get = await client.callTool({
+      name: "store_get",
+      arguments: {
+        namespace: ["users", USER, "profile"],
+        key: "prefs",
+        user_id: USER,
+        agent_id: AGENT_HI,
+      },
+    });
+    expect(get.isError).toBeFalsy();
+    const fetched = parseText(get);
+    expect((fetched.item as { key: string }).key).toBe("prefs");
+
+    const search = await client.callTool({
+      name: "store_search",
+      arguments: {
+        namespace_prefix: ["users", USER],
+        user_id: USER,
+        agent_id: AGENT_HI,
+        query: "pizza",
+      },
+    });
+    expect(search.isError).toBeFalsy();
+    const searched = parseText(search);
+    expect((searched.items as Array<{ key: string }>)[0]?.key).toBe("prefs");
+
+    const namespaces = await client.callTool({
+      name: "store_list_namespaces",
+      arguments: {
+        prefix: ["users", USER],
+        user_id: USER,
+        agent_id: AGENT_HI,
+      },
+    });
+    expect(namespaces.isError).toBeFalsy();
+    const listed = parseText(namespaces);
+    expect(listed.namespaces).toEqual([["users", USER, "profile"]]);
+  });
+});

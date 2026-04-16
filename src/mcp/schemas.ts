@@ -1,14 +1,32 @@
 import { z } from "zod";
+import type { JsonObject, JsonValue } from "../utils/json.js";
 
 // ---------------------------------------------------------------------------
 // Shared primitives
 // ---------------------------------------------------------------------------
 
 const ScopeSchema = z.enum(["agent", "project", "global"]);
+const NamespaceSchema = z.array(z.string().min(1)).min(1);
 
 const RoleSchema = z.enum(["owner", "contributor", "readonly"]).default("contributor");
 
 const TrustTierSchema = z.union([z.literal(1), z.literal(2), z.literal(3)]);
+
+const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.array(JsonValueSchema),
+    z.record(z.string(), JsonValueSchema),
+  ])
+);
+
+const JsonObjectSchema: z.ZodType<JsonObject> = z.record(
+  z.string(),
+  JsonValueSchema
+);
 
 // ---------------------------------------------------------------------------
 // Memory schemas
@@ -109,3 +127,93 @@ export const ConflictFiltersSchema = z.object({
 });
 
 export type ConflictFilters = z.infer<typeof ConflictFiltersSchema>;
+
+// ---------------------------------------------------------------------------
+// LangGraph store schemas
+// ---------------------------------------------------------------------------
+
+export const StoreToolScopeSchema = ScopeSchema.optional();
+
+export const StorePutArgsSchema = z.object({
+  namespace: NamespaceSchema,
+  key: z.string().min(1),
+  value_json: JsonObjectSchema,
+  user_id: z.string().min(1),
+  agent_id: z.string().min(1),
+  session_id: z.string().min(1).optional(),
+  scope: StoreToolScopeSchema,
+  project_id: z.string().optional(),
+  metadata_json: JsonObjectSchema.optional(),
+});
+
+export type StorePutArgsInput = z.infer<typeof StorePutArgsSchema>;
+
+export const StoreGetArgsSchema = z.object({
+  namespace: NamespaceSchema,
+  key: z.string().min(1),
+  user_id: z.string().min(1),
+  agent_id: z.string().min(1),
+  scope: StoreToolScopeSchema,
+  project_id: z.string().optional(),
+});
+
+export type StoreGetArgsInput = z.infer<typeof StoreGetArgsSchema>;
+
+export const StoreSearchArgsSchema = z.object({
+  namespace_prefix: NamespaceSchema,
+  user_id: z.string().min(1),
+  agent_id: z.string().min(1),
+  query: z.string().min(1).optional(),
+  limit: z.number().int().min(1).max(500).optional(),
+  offset: z.number().int().min(0).optional(),
+  scope: StoreToolScopeSchema,
+  project_id: z.string().optional(),
+  filter_json: JsonObjectSchema.optional(),
+});
+
+export type StoreSearchArgsInput = z.infer<typeof StoreSearchArgsSchema>;
+
+export const StoreDeleteArgsSchema = z.object({
+  namespace: NamespaceSchema,
+  key: z.string().min(1),
+  agent_id: z.string().min(1),
+  user_id: z.string().min(1),
+  scope: StoreToolScopeSchema,
+  project_id: z.string().optional(),
+});
+
+export type StoreDeleteArgsInput = z.infer<typeof StoreDeleteArgsSchema>;
+
+export const StoreListNamespacesArgsSchema = z.object({
+  prefix: NamespaceSchema.optional(),
+  suffix: NamespaceSchema.optional(),
+  user_id: z.string().min(1),
+  agent_id: z.string().min(1),
+  max_depth: z.number().int().min(1).optional(),
+  limit: z.number().int().min(1).max(500).optional(),
+  offset: z.number().int().min(0).optional(),
+  scope: StoreToolScopeSchema,
+  project_id: z.string().optional(),
+});
+
+export type StoreListNamespacesArgsInput = z.infer<
+  typeof StoreListNamespacesArgsSchema
+>;
+
+export const InsertStoreItemInputSchema = z.object({
+  memory_id: z.string().min(1),
+  user_id: z.string().min(1),
+  scope: ScopeSchema,
+  owner_id: z.string().min(1),
+  project_id: z.string().optional(),
+  agent_id: z.string().min(1),
+  framework: z.string().optional(),
+  session_id: z.string().optional(),
+  namespace: NamespaceSchema,
+  key: z.string().min(1),
+  value_json: JsonObjectSchema,
+  metadata_json: JsonObjectSchema.optional(),
+  search_text: z.string().min(1),
+});
+
+export type InsertStoreItemInput = z.infer<typeof InsertStoreItemInputSchema>;

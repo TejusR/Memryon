@@ -117,6 +117,30 @@ CREATE TABLE IF NOT EXISTS candidate_buffer (
   CHECK (scope = 'project' OR project_id IS NULL)
 );
 
+-- LangGraph-native store items with exact namespace/key semantics
+CREATE TABLE IF NOT EXISTS store_items (
+  id             TEXT PRIMARY KEY,  -- ULID
+  memory_id      TEXT NOT NULL REFERENCES memories(id),
+  user_id        TEXT NOT NULL,
+  scope          TEXT NOT NULL CHECK (scope IN ('agent', 'project', 'global')),
+  owner_id       TEXT NOT NULL,
+  project_id     TEXT REFERENCES projects(id),
+  agent_id       TEXT NOT NULL REFERENCES agents(agent_id),
+  framework      TEXT,
+  session_id     TEXT,
+  namespace_json TEXT NOT NULL,
+  namespace_path TEXT NOT NULL,
+  item_key       TEXT NOT NULL,
+  value_json     TEXT NOT NULL,
+  metadata_json  TEXT,
+  search_text    TEXT NOT NULL,
+  created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  deleted_at     TEXT,
+  CHECK (scope != 'project' OR project_id IS NOT NULL),
+  CHECK (scope = 'project' OR project_id IS NULL)
+);
+
 -- Per-framework failure logging
 CREATE TABLE IF NOT EXISTS adapter_errors (
   id         TEXT PRIMARY KEY,  -- ULID
@@ -164,6 +188,12 @@ CREATE TABLE IF NOT EXISTS memscene_memories (
   PRIMARY KEY (scene_id, memory_id)
 );
 
+CREATE VIRTUAL TABLE IF NOT EXISTS store_items_fts USING fts5(
+  search_text,
+  content='store_items',
+  content_rowid='rowid'
+);
+
 -- FTS5 virtual table for full-text search
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
   content,
@@ -191,6 +221,23 @@ CREATE TRIGGER IF NOT EXISTS memories_fts_update AFTER UPDATE ON memories BEGIN
   VALUES ('delete', old.rowid, old.content, old.content_type, old.agent_id, old.project_id, old.scope);
   INSERT INTO memories_fts(rowid, content, content_type, agent_id, project_id, scope)
   VALUES (new.rowid, new.content, new.content_type, new.agent_id, new.project_id, new.scope);
+END;
+
+CREATE TRIGGER IF NOT EXISTS store_items_fts_insert AFTER INSERT ON store_items BEGIN
+  INSERT INTO store_items_fts(rowid, search_text)
+  VALUES (new.rowid, new.search_text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS store_items_fts_delete AFTER DELETE ON store_items BEGIN
+  INSERT INTO store_items_fts(store_items_fts, rowid, search_text)
+  VALUES ('delete', old.rowid, old.search_text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS store_items_fts_update AFTER UPDATE ON store_items BEGIN
+  INSERT INTO store_items_fts(store_items_fts, rowid, search_text)
+  VALUES ('delete', old.rowid, old.search_text);
+  INSERT INTO store_items_fts(rowid, search_text)
+  VALUES (new.rowid, new.search_text);
 END;
 `;
 
@@ -225,6 +272,16 @@ CREATE INDEX IF NOT EXISTS idx_pa_agent
 -- Consolidation worker pending queue
 CREATE INDEX IF NOT EXISTS idx_candidate_buffer_status
   ON candidate_buffer(status, created_at ASC);
+
+-- LangGraph store lookup by exact visibility bucket + namespace + key
+CREATE UNIQUE INDEX IF NOT EXISTS idx_store_items_current_exact
+  ON store_items(scope, owner_id, namespace_json, item_key)
+  WHERE deleted_at IS NULL;
+
+-- Store namespace prefix scans within a visibility bucket
+CREATE INDEX IF NOT EXISTS idx_store_items_lookup
+  ON store_items(user_id, scope, owner_id, namespace_path, updated_at DESC)
+  WHERE deleted_at IS NULL;
 
 -- Conflict audit lookup by project
 CREATE INDEX IF NOT EXISTS idx_conflict_log_project
