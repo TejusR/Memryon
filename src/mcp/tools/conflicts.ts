@@ -1,0 +1,31 @@
+import type { Database } from "../../db/connection.js";
+import {
+  getUnresolvedConflicts,
+  type ConflictRow,
+} from "../../db/queries/conflicts.js";
+
+export interface ConflictsArgs {
+  since?: string;
+  framework?: string;
+  project_id?: string;
+  scope?: "agent" | "project" | "global";
+}
+
+export interface ConflictsResult {
+  conflict_log: ConflictRow[];
+  count: number;
+}
+
+export function handleConflicts(
+  db: Database,
+  args: ConflictsArgs
+): ConflictsResult {
+  const rows = getUnresolvedConflicts(db, {
+    ...(args.project_id !== undefined ? { projectId: args.project_id } : {}),
+    ...(args.scope !== undefined ? { scope: args.scope } : {}),
+    ...(args.since !== undefined ? { since: args.since } : {}),
+    ...(args.framework !== undefined ? { framework: args.framework } : {}),
+  });
+
+  return { conflict_log: rows, count: rows.length };
+}
