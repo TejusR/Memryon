@@ -6,6 +6,7 @@ import {
 } from "../../db/queries/store-items.js";
 import { StoreDeleteArgsSchema } from "../schemas.js";
 import { resolveStoreContext } from "./store-shared.js";
+import { MemryonError, withDbError } from "../../utils/errors.js";
 
 export interface StoreDeleteArgs {
   namespace: string[];
@@ -23,6 +24,9 @@ export interface StoreDeleteResult {
   memcell_id?: string;
 }
 
+/**
+ * Deletes an exact LangGraph store item and invalidates its backing MemCell.
+ */
 export function handleStoreDelete(
   db: Database,
   rawArgs: unknown
@@ -35,35 +39,39 @@ export function handleStoreDelete(
     ...(args.project_id !== undefined ? { project_id: args.project_id } : {}),
   });
 
-  return db.transaction(() => {
-    const existing = getCurrentStoreItem(db, {
-      userId: context.userId,
-      scope: context.scope,
-      ownerId: context.ownerId,
-      namespace: args.namespace,
-      key: args.key,
-    });
+  return withDbError("executing store_delete", () =>
+    db.transaction(() => {
+      const existing = getCurrentStoreItem(db, {
+        userId: context.userId,
+        scope: context.scope,
+        ownerId: context.ownerId,
+        namespace: args.namespace,
+        key: args.key,
+      });
 
-    if (existing === undefined) {
+      if (existing === undefined) {
+        return {
+          status: "not_found",
+          key: args.key,
+          namespace: args.namespace,
+        } satisfies StoreDeleteResult;
+      }
+
+      if (!retireStoreItem(db, existing.id)) {
+        throw new MemryonError(`Failed to retire store item '${existing.id}'`);
+      }
+      if (!invalidateMemory(db, existing.memory_id, context.agentId)) {
+        throw new MemryonError(
+          `Failed to invalidate memory '${existing.memory_id}'`
+        );
+      }
+
       return {
-        status: "not_found",
+        status: "deleted" as const,
         key: args.key,
         namespace: args.namespace,
+        memcell_id: existing.memory_id,
       } satisfies StoreDeleteResult;
-    }
-
-    if (!retireStoreItem(db, existing.id)) {
-      throw new Error(`Failed to retire store item '${existing.id}'`);
-    }
-    if (!invalidateMemory(db, existing.memory_id, context.agentId)) {
-      throw new Error(`Failed to invalidate memory '${existing.memory_id}'`);
-    }
-
-    return {
-      status: "deleted" as const,
-      key: args.key,
-      namespace: args.namespace,
-      memcell_id: existing.memory_id,
-    } satisfies StoreDeleteResult;
-  })();
+    })()
+  );
 }

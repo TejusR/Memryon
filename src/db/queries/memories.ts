@@ -6,6 +6,11 @@ import {
   type InsertMemoryInput,
   type MemoryFilters,
 } from "../../mcp/schemas.js";
+import {
+  requireNonEmptyString,
+  requireRecord,
+  withDbError,
+} from "../../utils/errors.js";
 
 // ---------------------------------------------------------------------------
 // Row type
@@ -41,68 +46,74 @@ export interface MemoryRow {
 // insertMemory
 // ---------------------------------------------------------------------------
 
-export function insertMemory(
-  db: Database,
-  input: InsertMemoryInput
-): MemoryRow {
-  // Re-parse at runtime so callers that bypass TypeScript still get validation.
+/**
+ * Inserts a memory row and returns the persisted record.
+ */
+export function insertMemory(db: Database, input: InsertMemoryInput): MemoryRow {
   const parsed = InsertMemoryInputSchema.parse(input);
-
   const id = ulid();
   const now = new Date().toISOString();
   const projectId = "project_id" in parsed ? parsed.project_id : null;
   const tags = JSON.stringify(parsed.tags);
 
-  db.prepare(
-    `INSERT INTO memories (
-       id, user_id, scope, agent_id, project_id,
-       content, content_type, tags,
-       valid_from, valid_until, recorded_at,
-       confidence, importance,
-       caused_by, supersedes,
-       framework, session_id, source_type,
-       embedding, embedding_model_version
-     ) VALUES (
-       ?, ?, ?, ?, ?,
-       ?, ?, ?,
-       ?, ?, ?,
-       ?, ?,
-       ?, ?,
-       ?, ?, ?,
-       ?, ?
-     )`
-  ).run(
-    id,
-    parsed.user_id,
-    parsed.scope,
-    parsed.agent_id,
-    projectId,
-    parsed.content,
-    parsed.content_type,
-    tags,
-    parsed.valid_from ?? now,
-    parsed.valid_until ?? null,
-    now,
-    parsed.confidence,
-    parsed.importance,
-    parsed.caused_by ?? null,
-    parsed.supersedes ?? null,
-    parsed.framework ?? null,
-    parsed.session_id ?? null,
-    parsed.source_type,
-    parsed.embedding ?? null,
-    parsed.embedding_model_version ?? null
-  );
+  return withDbError(`inserting memory '${id}'`, () => {
+    db.prepare(
+      `INSERT INTO memories (
+         id, user_id, scope, agent_id, project_id,
+         content, content_type, tags,
+         valid_from, valid_until, recorded_at,
+         confidence, importance,
+         caused_by, supersedes,
+         framework, session_id, source_type,
+         embedding, embedding_model_version
+       ) VALUES (
+         ?, ?, ?, ?, ?,
+         ?, ?, ?,
+         ?, ?, ?,
+         ?, ?,
+         ?, ?,
+         ?, ?, ?,
+         ?, ?
+       )`
+    ).run(
+      id,
+      parsed.user_id,
+      parsed.scope,
+      parsed.agent_id,
+      projectId,
+      parsed.content,
+      parsed.content_type,
+      tags,
+      parsed.valid_from ?? now,
+      parsed.valid_until ?? null,
+      now,
+      parsed.confidence,
+      parsed.importance,
+      parsed.caused_by ?? null,
+      parsed.supersedes ?? null,
+      parsed.framework ?? null,
+      parsed.session_id ?? null,
+      parsed.source_type,
+      parsed.embedding ?? null,
+      parsed.embedding_model_version ?? null
+    );
 
-  return db
-    .prepare<[string], MemoryRow>(`SELECT * FROM memories WHERE id = ?`)
-    .get(id) as MemoryRow;
+    return requireRecord(
+      db
+        .prepare<[string], MemoryRow>(`SELECT * FROM memories WHERE id = ?`)
+        .get(id),
+      `Memory '${id}' was not found after insertion`
+    );
+  });
 }
 
 // ---------------------------------------------------------------------------
 // getValidMemories
 // ---------------------------------------------------------------------------
 
+/**
+ * Returns currently valid memories filtered by user, scope, project, and agent.
+ */
 export function getValidMemories(
   db: Database,
   filters: MemoryFilters,
@@ -112,31 +123,32 @@ export function getValidMemories(
   const { user_id, scope, project_id, agent_id } =
     MemoryFiltersSchema.parse(filters);
 
-  // Use (? IS NULL OR col = ?) so a single prepared statement covers optional filters.
-  return db
-    .prepare<unknown[], MemoryRow>(
-      `SELECT * FROM memories
-       WHERE user_id = ?
-         AND invalidated_at IS NULL
-         AND valid_until IS NULL
-         AND (? IS NULL OR scope = ?)
-         AND (? IS NULL OR project_id = ?)
-         AND (? IS NULL OR agent_id = ?)
-       ORDER BY recorded_at DESC
-       LIMIT ? OFFSET ?`
-    )
-    .all(
-      user_id,
-      scope ?? null, scope ?? null,
-      project_id ?? null, project_id ?? null,
-      agent_id ?? null, agent_id ?? null,
-      limit,
-      offset
-    );
+  return withDbError(`loading valid memories for user '${user_id}'`, () =>
+    db
+      .prepare<unknown[], MemoryRow>(
+        `SELECT * FROM memories
+         WHERE user_id = ?
+           AND invalidated_at IS NULL
+           AND valid_until IS NULL
+           AND (? IS NULL OR scope = ?)
+           AND (? IS NULL OR project_id = ?)
+           AND (? IS NULL OR agent_id = ?)
+         ORDER BY recorded_at DESC
+         LIMIT ? OFFSET ?`
+      )
+      .all(
+        user_id,
+        scope ?? null, scope ?? null,
+        project_id ?? null, project_id ?? null,
+        agent_id ?? null, agent_id ?? null,
+        limit,
+        offset
+      )
+  );
 }
 
 // ---------------------------------------------------------------------------
-// fanOutQuery — three-tier fan-out: project > agent-private > global
+// fanOutQuery - three-tier fan-out: project > agent-private > global
 // ---------------------------------------------------------------------------
 
 const PROJECT_STMT = `
@@ -168,6 +180,9 @@ const GLOBAL_STMT = `
   ORDER BY recorded_at DESC
   LIMIT ?`;
 
+/**
+ * Fans a recall query out across project, agent, and global scopes in priority order.
+ */
 export function fanOutQuery(
   db: Database,
   userId: string,
@@ -175,42 +190,48 @@ export function fanOutQuery(
   projectId?: string,
   limit = 20
 ): MemoryRow[] {
-  if (!userId) throw new Error("userId is required");
-  if (!agentId) throw new Error("agentId is required");
+  const resolvedUserId = requireNonEmptyString(userId, "userId");
+  const resolvedAgentId = requireNonEmptyString(agentId, "agentId");
 
-  const projectRows: MemoryRow[] = projectId
-    ? db
-        .prepare<unknown[], MemoryRow>(PROJECT_STMT)
-        .all(projectId, userId, limit)
-    : [];
+  return withDbError(`running fan-out query for user '${resolvedUserId}'`, () => {
+    const projectRows: MemoryRow[] = projectId
+      ? db
+          .prepare<unknown[], MemoryRow>(PROJECT_STMT)
+          .all(projectId, resolvedUserId, limit)
+      : [];
 
-  const agentRows: MemoryRow[] = db
-    .prepare<unknown[], MemoryRow>(AGENT_STMT)
-    .all(agentId, userId, limit);
+    const agentRows: MemoryRow[] = db
+      .prepare<unknown[], MemoryRow>(AGENT_STMT)
+      .all(resolvedAgentId, resolvedUserId, limit);
 
-  const globalRows: MemoryRow[] = db
-    .prepare<unknown[], MemoryRow>(GLOBAL_STMT)
-    .all(userId, limit);
+    const globalRows: MemoryRow[] = db
+      .prepare<unknown[], MemoryRow>(GLOBAL_STMT)
+      .all(resolvedUserId, limit);
 
-  // Merge tiers in priority order, deduplicate by id, respect overall limit.
-  const seen = new Set<string>();
-  const results: MemoryRow[] = [];
+    const seen = new Set<string>();
+    const results: MemoryRow[] = [];
 
-  for (const row of [...projectRows, ...agentRows, ...globalRows]) {
-    if (!seen.has(row.id)) {
-      seen.add(row.id);
-      results.push(row);
-      if (results.length === limit) break;
+    for (const row of [...projectRows, ...agentRows, ...globalRows]) {
+      if (!seen.has(row.id)) {
+        seen.add(row.id);
+        results.push(row);
+        if (results.length === limit) {
+          break;
+        }
+      }
     }
-  }
 
-  return results;
+    return results;
+  });
 }
 
 // ---------------------------------------------------------------------------
 // findByFTS
 // ---------------------------------------------------------------------------
 
+/**
+ * Searches memories through the FTS index while preserving standard visibility filters.
+ */
 export function findByFTS(
   db: Database,
   query: string,
@@ -220,48 +241,52 @@ export function findByFTS(
   const { user_id, scope, project_id, agent_id } =
     MemoryFiltersSchema.parse(filters);
 
-  return db
-    .prepare<unknown[], MemoryRow>(
-      `SELECT m.* FROM memories m
-       WHERE m.rowid IN (
-         SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?
-       )
-         AND m.user_id = ?
-         AND m.invalidated_at IS NULL
-         AND m.valid_until IS NULL
-         AND (? IS NULL OR m.scope = ?)
-         AND (? IS NULL OR m.project_id = ?)
-         AND (? IS NULL OR m.agent_id = ?)
-       ORDER BY m.recorded_at DESC
-       LIMIT ?`
-    )
-    .all(
-      query,
-      user_id,
-      scope ?? null, scope ?? null,
-      project_id ?? null, project_id ?? null,
-      agent_id ?? null, agent_id ?? null,
-      limit
-    );
+  return withDbError(`running FTS search for user '${user_id}'`, () =>
+    db
+      .prepare<unknown[], MemoryRow>(
+        `SELECT m.* FROM memories m
+         WHERE m.rowid IN (
+           SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?
+         )
+           AND m.user_id = ?
+           AND m.invalidated_at IS NULL
+           AND m.valid_until IS NULL
+           AND (? IS NULL OR m.scope = ?)
+           AND (? IS NULL OR m.project_id = ?)
+           AND (? IS NULL OR m.agent_id = ?)
+         ORDER BY m.recorded_at DESC
+         LIMIT ?`
+      )
+      .all(
+        query,
+        user_id,
+        scope ?? null, scope ?? null,
+        project_id ?? null, project_id ?? null,
+        agent_id ?? null, agent_id ?? null,
+        limit
+      )
+  );
 }
 
 // ---------------------------------------------------------------------------
-// findBySemanticSimilarity — placeholder until sqlite-vec is wired up
+// findBySemanticSimilarity - placeholder until sqlite-vec is wired up
 // ---------------------------------------------------------------------------
 
+/**
+ * Falls back to recency-ordered matches until native sqlite-vec search is wired in.
+ */
 export function findBySemanticSimilarity(
   db: Database,
   _embedding: Buffer,
   filters: MemoryFilters,
   limit = 20
 ): MemoryRow[] {
-  // TODO: replace with sqlite-vec KNN once the extension is loaded:
+  // Planned implementation once sqlite-vec is available:
   //   SELECT m.*, vec_distance_cosine(m.embedding, ?) AS dist
   //   FROM memories m
   //   WHERE m.embedding IS NOT NULL
   //   ORDER BY dist ASC
   //   LIMIT ?
-  // For now, fall back to recency ordering so callers get usable results.
   return getValidMemories(db, filters, limit);
 }
 
@@ -269,35 +294,48 @@ export function findBySemanticSimilarity(
 // invalidateMemory
 // ---------------------------------------------------------------------------
 
+/**
+ * Soft-invalidates an active memory and records which agent performed the change.
+ */
 export function invalidateMemory(
   db: Database,
   memoryId: string,
   invalidatedBy: string
 ): boolean {
-  if (!memoryId) throw new Error("memoryId is required");
-  if (!invalidatedBy) throw new Error("invalidatedBy is required");
+  const resolvedMemoryId = requireNonEmptyString(memoryId, "memoryId");
+  const resolvedInvalidatedBy = requireNonEmptyString(
+    invalidatedBy,
+    "invalidatedBy"
+  );
 
-  const result = db
-    .prepare(
-      `UPDATE memories
-       SET invalidated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-           invalidated_by = ?,
-           valid_until    = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-       WHERE id = ?
-         AND invalidated_at IS NULL`
-    )
-    .run(invalidatedBy, memoryId);
+  return withDbError(`invalidating memory '${resolvedMemoryId}'`, () => {
+    const result = db
+      .prepare(
+        `UPDATE memories
+         SET invalidated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+             invalidated_by = ?,
+             valid_until    = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?
+           AND invalidated_at IS NULL`
+      )
+      .run(resolvedInvalidatedBy, resolvedMemoryId);
 
-  return result.changes > 0;
+    return result.changes > 0;
+  });
 }
 
+/**
+ * Loads a memory row by identifier regardless of current validity.
+ */
 export function getMemoryById(
   db: Database,
   memoryId: string
 ): MemoryRow | undefined {
-  if (!memoryId) throw new Error("memoryId is required");
+  const resolvedMemoryId = requireNonEmptyString(memoryId, "memoryId");
 
-  return db
-    .prepare<[string], MemoryRow>(`SELECT * FROM memories WHERE id = ?`)
-    .get(memoryId);
+  return withDbError(`loading memory '${resolvedMemoryId}'`, () =>
+    db
+      .prepare<[string], MemoryRow>(`SELECT * FROM memories WHERE id = ?`)
+      .get(resolvedMemoryId)
+  );
 }

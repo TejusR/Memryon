@@ -1,4 +1,5 @@
 import type { Database } from "better-sqlite3";
+import { withDbError } from "../utils/errors.js";
 
 export const SCHEMA_SQL = `
 -- Agents registry
@@ -293,7 +294,12 @@ CREATE INDEX IF NOT EXISTS idx_memscenes_scope
   ON memscenes(user_id, scope, updated_at DESC);
 `;
 
+/**
+ * Applies the full Memryon schema and supporting indexes to an open SQLite database.
+ */
 export function initSchema(db: Database): void {
-  db.exec(SCHEMA_SQL);
-  db.exec(INDEXES_SQL);
+  withDbError("initializing the SQLite schema", () => {
+    db.exec(SCHEMA_SQL);
+    db.exec(INDEXES_SQL);
+  });
 }

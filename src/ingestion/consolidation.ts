@@ -10,6 +10,12 @@ import { getProject } from "../db/queries/projects.js";
 import { handleRemember } from "../mcp/tools/remember.js";
 import { resolveByTrustTier } from "../scope/conflict-detection.js";
 import { runStalenessSweep } from "../utils/staleness.js";
+import {
+  MemryonError,
+  requireRecord,
+  withDbError,
+  errorMessage,
+} from "../utils/errors.js";
 import type { CandidateBufferRow } from "./fast-path.js";
 
 type QualityGateAction = "ACCEPT" | "UPDATE" | "REJECT";
@@ -355,7 +361,7 @@ function logAdapterError(
   adapter: string,
   error: unknown
 ): void {
-  const message = error instanceof Error ? error.stack ?? error.message : String(error);
+  const message = error instanceof Error ? error.stack ?? error.message : errorMessage(error);
 
   db.prepare(
     `INSERT INTO adapter_errors (id, adapter, error)
@@ -451,15 +457,12 @@ function upsertConflictLog(
 }
 
 function getMemoryById(db: Database, memoryId: string): MemoryRow {
-  const row = db
-    .prepare<[string], MemoryRow>(`SELECT * FROM memories WHERE id = ?`)
-    .get(memoryId);
-
-  if (!row) {
-    throw new Error(`Memory '${memoryId}' not found`);
-  }
-
-  return row;
+  return requireRecord(
+    db
+      .prepare<[string], MemoryRow>(`SELECT * FROM memories WHERE id = ?`)
+      .get(memoryId),
+    `Memory '${memoryId}' not found`
+  );
 }
 
 function deriveSceneSummary(memories: MemoryRow[]): string {
@@ -631,13 +634,24 @@ function clusterMemScenes(db: Database): void {
   persistMemScenes(db, clusters);
 }
 
+/**
+ * Runs the consolidation quality gate for a buffered candidate and persists the result.
+ */
 export async function processCandidate(
   db: Database,
   candidate: CandidateBufferRow,
   llmClient: QualityGateClient
 ): Promise<ProcessCandidateResult> {
-  const resolvedCandidate = enrichCandidate(db, candidate);
-  const context = loadExistingMemoryContext(db, resolvedCandidate);
+  const { resolvedCandidate, context } = withDbError(
+    `loading context for candidate '${candidate.id}'`,
+    () => {
+      const enriched = enrichCandidate(db, candidate);
+      return {
+        resolvedCandidate: enriched,
+        context: loadExistingMemoryContext(db, enriched),
+      };
+    }
+  );
 
   try {
     const decision = await llmClient.qualityGate({
@@ -657,59 +671,80 @@ export async function processCandidate(
 
     const confidence = clampConfidence(decision.confidence);
 
-    if (decision.action === "REJECT") {
-      updateCandidateStatus(
-        db,
-        resolvedCandidate.id,
-        "REJECTED",
-        decision.action,
-        confidence,
-        decision.reason
-      );
+    return withDbError(`processing candidate '${resolvedCandidate.id}'`, () => {
+      if (decision.action === "REJECT") {
+        updateCandidateStatus(
+          db,
+          resolvedCandidate.id,
+          "REJECTED",
+          decision.action,
+          confidence,
+          decision.reason
+        );
 
-      return {
-        candidate_id: resolvedCandidate.id,
-        action: "REJECT",
-      };
-    }
-
-    const contradictionTarget = findContradictionTarget(context, resolvedCandidate);
-
-    if (contradictionTarget) {
-      const conflict = handleContradiction(db, contradictionTarget, {
-        ...resolvedCandidate,
-        decision_confidence: confidence,
-      });
-
-      updateCandidateStatus(
-        db,
-        resolvedCandidate.id,
-        "ACCEPTED",
-        decision.action,
-        confidence,
-        decision.reason
-      );
-
-      return {
-        candidate_id: resolvedCandidate.id,
-        action: decision.action,
-        memory_id: conflict.candidate_memory_id,
-        conflict_id: conflict.id,
-      };
-    }
-
-    if (decision.action === "UPDATE") {
-      const target = resolveUpdateTarget(context, decision);
-      if (target) {
-        invalidateMemory(db, target.id, resolvedCandidate.agent_id);
+        return {
+          candidate_id: resolvedCandidate.id,
+          action: "REJECT",
+        };
       }
 
-      const memoryId = rememberCandidate(
-        db,
-        resolvedCandidate,
-        confidence,
-        target?.id
-      );
+      const contradictionTarget = findContradictionTarget(context, resolvedCandidate);
+
+      if (contradictionTarget) {
+        const conflict = handleContradiction(db, contradictionTarget, {
+          ...resolvedCandidate,
+          decision_confidence: confidence,
+        });
+
+        updateCandidateStatus(
+          db,
+          resolvedCandidate.id,
+          "ACCEPTED",
+          decision.action,
+          confidence,
+          decision.reason
+        );
+
+        return {
+          candidate_id: resolvedCandidate.id,
+          action: decision.action,
+          memory_id: conflict.candidate_memory_id,
+          conflict_id: conflict.id,
+        };
+      }
+
+      if (decision.action === "UPDATE") {
+        const target = resolveUpdateTarget(context, decision);
+        if (target && !invalidateMemory(db, target.id, resolvedCandidate.agent_id)) {
+          throw new MemryonError(
+            `Failed to invalidate superseded memory '${target.id}'`
+          );
+        }
+
+        const memoryId = rememberCandidate(
+          db,
+          resolvedCandidate,
+          confidence,
+          target?.id
+        );
+
+        updateCandidateStatus(
+          db,
+          resolvedCandidate.id,
+          "ACCEPTED",
+          decision.action,
+          confidence,
+          decision.reason
+        );
+
+        return {
+          candidate_id: resolvedCandidate.id,
+          action: "UPDATE",
+          memory_id: memoryId,
+        };
+      }
+
+      const memoryId = rememberCandidate(db, resolvedCandidate, confidence);
 
       updateCandidateStatus(
         db,
@@ -722,27 +757,10 @@ export async function processCandidate(
 
       return {
         candidate_id: resolvedCandidate.id,
-        action: "UPDATE",
+        action: "ACCEPT",
         memory_id: memoryId,
       };
-    }
-
-    const memoryId = rememberCandidate(db, resolvedCandidate, confidence);
-
-    updateCandidateStatus(
-      db,
-      resolvedCandidate.id,
-      "ACCEPTED",
-      decision.action,
-      confidence,
-      decision.reason
-    );
-
-    return {
-      candidate_id: resolvedCandidate.id,
-      action: "ACCEPT",
-      memory_id: memoryId,
-    };
+    });
   } catch (error) {
     logAdapterError(db, candidate.framework ?? "quality-gate", error);
     updateCandidateStatus(
@@ -751,7 +769,7 @@ export async function processCandidate(
       "REJECTED",
       "REJECT",
       0,
-      error instanceof Error ? error.message : String(error)
+      errorMessage(error)
     );
 
     return {
@@ -761,13 +779,20 @@ export async function processCandidate(
   }
 }
 
+/**
+ * Processes all pending candidates in arbitration order and runs follow-up maintenance passes.
+ */
 export async function runConsolidationCycle(
   db: Database,
   llmClient: QualityGateClient
 ): Promise<ConsolidationCycleResult> {
-  const pendingCandidates = getPendingCandidates(db);
+  const pendingCandidates = withDbError("loading pending consolidation candidates", () =>
+    getPendingCandidates(db)
+  );
   const arbitration = arbitrateConcurrentWrites(db, pendingCandidates);
-  const rankMap = new Map(arbitration.map((decision) => [decision.candidateId, decision.rank]));
+  const rankMap = new Map(
+    arbitration.map((decision) => [decision.candidateId, decision.rank])
+  );
   const ordered = [...pendingCandidates].sort(
     (left, right) => (rankMap.get(left.id) ?? 0) - (rankMap.get(right.id) ?? 0)
   );
@@ -778,7 +803,9 @@ export async function runConsolidationCycle(
   let conflictsDetected = 0;
 
   for (const candidate of ordered) {
-    const latest = getCandidateById(db, candidate.id);
+    const latest = withDbError(`reloading candidate '${candidate.id}'`, () =>
+      getCandidateById(db, candidate.id)
+    );
     if (!latest || latest.status !== "PENDING") {
       continue;
     }
@@ -797,7 +824,9 @@ export async function runConsolidationCycle(
     }
   }
 
-  clusterMemScenes(db);
+  withDbError("clustering memscenes", () => {
+    clusterMemScenes(db);
+  });
   runStalenessSweep(db);
 
   return {
@@ -808,158 +837,175 @@ export async function runConsolidationCycle(
   };
 }
 
+/**
+ * Records a contradiction by invalidating the older memory, writing the new one, and logging the conflict.
+ */
 export function handleContradiction(
   db: Database,
   existingMemory: MemoryRow,
   candidate: CandidateBufferRow | (CandidateBufferRow & { decision_confidence?: number })
 ): ConflictLogRow {
-  const resolvedCandidate = enrichCandidate(db, candidate);
-  const decisionConfidence = clampConfidence(candidate.decision_confidence);
-  const validUntil = resolvedCandidate.created_at;
+  return withDbError(
+    `handling contradiction for memory '${existingMemory.id}'`,
+    () => {
+      const resolvedCandidate = enrichCandidate(db, candidate);
+      const decisionConfidence = clampConfidence(candidate.decision_confidence);
+      const validUntil = resolvedCandidate.created_at;
 
-  db.prepare(
-    `UPDATE memories
-     SET valid_until = ?,
-         invalidated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-         invalidated_by = ?
-     WHERE id = ?
-       AND invalidated_at IS NULL`
-  ).run(validUntil, resolvedCandidate.agent_id, existingMemory.id);
+      db.prepare(
+        `UPDATE memories
+         SET valid_until = ?,
+             invalidated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+             invalidated_by = ?
+         WHERE id = ?
+           AND invalidated_at IS NULL`
+      ).run(validUntil, resolvedCandidate.agent_id, existingMemory.id);
 
-  const candidateMemoryId = rememberCandidate(
-    db,
-    {
-      ...resolvedCandidate,
-      project_id: resolvedCandidate.project_id ?? existingMemory.project_id,
-    },
-    decisionConfidence,
-    existingMemory.id
-  );
+      const candidateMemoryId = rememberCandidate(
+        db,
+        {
+          ...resolvedCandidate,
+          project_id: resolvedCandidate.project_id ?? existingMemory.project_id,
+        },
+        decisionConfidence,
+        existingMemory.id
+      );
 
-  const candidateMemory = getMemoryById(db, candidateMemoryId);
-  const conflict = logConflict(db, {
-    memoryA: existingMemory.id,
-    memoryB: candidateMemory.id,
-    ...(candidateMemory.project_id ? { projectId: candidateMemory.project_id } : {}),
-    conflictType: candidateMemory.project_id ? "intra_project" : "cross_scope",
-  });
+      const candidateMemory = getMemoryById(db, candidateMemoryId);
+      const conflict = logConflict(db, {
+        memoryA: existingMemory.id,
+        memoryB: candidateMemory.id,
+        ...(candidateMemory.project_id ? { projectId: candidateMemory.project_id } : {}),
+        conflictType: candidateMemory.project_id ? "intra_project" : "cross_scope",
+      });
 
-  let resolutionStatus: ConflictResolutionStatus = "pending";
-  let resolutionReason: string | null = null;
-  let resolvedBy: string | null = null;
+      let resolutionStatus: ConflictResolutionStatus = "pending";
+      let resolutionReason: string | null = null;
+      let resolvedBy: string | null = null;
 
-  if (
-    existingMemory.project_id &&
-    candidateMemory.project_id &&
-    existingMemory.project_id === candidateMemory.project_id
-  ) {
-    const resolvedConflict = resolveByTrustTier(db, conflict.id);
-    if (resolvedConflict.resolved_at) {
-      resolutionStatus = "resolved";
-      resolutionReason = resolvedConflict.resolution;
-      resolvedBy = resolvedConflict.resolved_by;
-    } else {
-      resolutionStatus = "flagged";
-      resolutionReason = "trust_tier_tie";
+      if (
+        existingMemory.project_id &&
+        candidateMemory.project_id &&
+        existingMemory.project_id === candidateMemory.project_id
+      ) {
+        const resolvedConflict = resolveByTrustTier(db, conflict.id);
+        if (resolvedConflict.resolved_at) {
+          resolutionStatus = "resolved";
+          resolutionReason = resolvedConflict.resolution;
+          resolvedBy = resolvedConflict.resolved_by;
+        } else {
+          resolutionStatus = "flagged";
+          resolutionReason = "trust_tier_tie";
+        }
+      }
+
+      return upsertConflictLog(db, {
+        conflictId: conflict.id,
+        existingMemory,
+        candidateMemory,
+        resolutionStatus,
+        resolutionReason,
+        resolvedBy,
+      });
     }
-  }
-
-  return upsertConflictLog(db, {
-    conflictId: conflict.id,
-    existingMemory,
-    candidateMemory,
-    resolutionStatus,
-    resolutionReason,
-    resolvedBy,
-  });
+  );
 }
 
+/**
+ * Ranks near-simultaneous candidate writes so the most reliable one is processed first.
+ */
 export function arbitrateConcurrentWrites(
   db: Database,
   candidates: CandidateBufferRow[]
 ): ArbitrationDecision[] {
-  const groups: CandidateBufferRow[][] = [];
-  const sortedCandidates = [...candidates].sort(
-    (left, right) => parseTimestamp(left.created_at) - parseTimestamp(right.created_at)
-  );
-
-  for (const candidate of sortedCandidates) {
-    const group = groups.find((currentGroup) =>
-      currentGroup.some(
-        (existing) =>
-          Math.abs(parseTimestamp(existing.created_at) - parseTimestamp(candidate.created_at)) <=
-            CONCURRENT_WINDOW_MS &&
-          contentSimilarity(existing.content, candidate.content) >= 0.7
-      )
+  return withDbError("arbitrating concurrent writes", () => {
+    const groups: CandidateBufferRow[][] = [];
+    const sortedCandidates = [...candidates].sort(
+      (left, right) =>
+        parseTimestamp(left.created_at) - parseTimestamp(right.created_at)
     );
 
-    if (group) {
-      group.push(candidate);
-    } else {
-      groups.push([candidate]);
-    }
-  }
+    for (const candidate of sortedCandidates) {
+      const group = groups.find((currentGroup) =>
+        currentGroup.some(
+          (existing) =>
+            Math.abs(
+              parseTimestamp(existing.created_at) -
+                parseTimestamp(candidate.created_at)
+            ) <= CONCURRENT_WINDOW_MS &&
+            contentSimilarity(existing.content, candidate.content) >= 0.7
+        )
+      );
 
-  const decisions: ArbitrationDecision[] = [];
-  let rank = 1;
-
-  for (const group of groups) {
-    const ordered = [...group].sort((left, right) => {
-      const confidenceDelta =
-        clampConfidence(right.decision_confidence) -
-        clampConfidence(left.decision_confidence);
-
-      if (confidenceDelta !== 0) {
-        return confidenceDelta;
+      if (group) {
+        group.push(candidate);
+      } else {
+        groups.push([candidate]);
       }
-
-      const hierarchyDelta =
-        frameworkPriority(right.framework) - frameworkPriority(left.framework);
-      if (hierarchyDelta !== 0) {
-        return hierarchyDelta;
-      }
-
-      return parseTimestamp(left.created_at) - parseTimestamp(right.created_at);
-    });
-
-    const top = ordered[0];
-    const runnerUp = ordered[1];
-    const tied =
-      top !== undefined &&
-      runnerUp !== undefined &&
-      clampConfidence(top.decision_confidence) ===
-        clampConfidence(runnerUp.decision_confidence) &&
-      frameworkPriority(top.framework) === frameworkPriority(runnerUp.framework);
-
-    const spanMs =
-      ordered.length > 1
-        ? parseTimestamp(ordered[ordered.length - 1]?.created_at ?? top?.created_at ?? "") -
-          parseTimestamp(top?.created_at ?? "")
-        : 0;
-
-    const forcedReview = tied && spanMs >= CONCURRENT_WINDOW_MS;
-    if (forcedReview && top) {
-      db.prepare(
-        `UPDATE candidate_buffer
-         SET review_required = 1,
-             decision_confidence = 0.5
-         WHERE id = ?`
-      ).run(top.id);
     }
 
-    for (const candidate of ordered) {
-      decisions.push({
-        candidateId: candidate.id,
-        rank,
-        effectiveConfidence:
-          forcedReview && candidate.id === top?.id
-            ? 0.5
-            : clampConfidence(candidate.decision_confidence),
-        reviewRequired: forcedReview && candidate.id === top?.id,
+    const decisions: ArbitrationDecision[] = [];
+    let rank = 1;
+
+    for (const group of groups) {
+      const ordered = [...group].sort((left, right) => {
+        const confidenceDelta =
+          clampConfidence(right.decision_confidence) -
+          clampConfidence(left.decision_confidence);
+
+        if (confidenceDelta !== 0) {
+          return confidenceDelta;
+        }
+
+        const hierarchyDelta =
+          frameworkPriority(right.framework) - frameworkPriority(left.framework);
+        if (hierarchyDelta !== 0) {
+          return hierarchyDelta;
+        }
+
+        return parseTimestamp(left.created_at) - parseTimestamp(right.created_at);
       });
-      rank += 1;
-    }
-  }
 
-  return decisions;
+      const top = ordered[0];
+      const runnerUp = ordered[1];
+      const tied =
+        top !== undefined &&
+        runnerUp !== undefined &&
+        clampConfidence(top.decision_confidence) ===
+          clampConfidence(runnerUp.decision_confidence) &&
+        frameworkPriority(top.framework) === frameworkPriority(runnerUp.framework);
+
+      const spanMs =
+        ordered.length > 1
+          ? parseTimestamp(
+              ordered[ordered.length - 1]?.created_at ?? top?.created_at ?? ""
+            ) - parseTimestamp(top?.created_at ?? "")
+          : 0;
+
+      const forcedReview = tied && spanMs >= CONCURRENT_WINDOW_MS;
+      if (forcedReview && top) {
+        db.prepare(
+          `UPDATE candidate_buffer
+           SET review_required = 1,
+               decision_confidence = 0.5
+           WHERE id = ?`
+        ).run(top.id);
+      }
+
+      for (const candidate of ordered) {
+        decisions.push({
+          candidateId: candidate.id,
+          rank,
+          effectiveConfidence:
+            forcedReview && candidate.id === top?.id
+              ? 0.5
+              : clampConfidence(candidate.decision_confidence),
+          reviewRequired: forcedReview && candidate.id === top?.id,
+        });
+        rank += 1;
+      }
+    }
+
+    return decisions;
+  });
 }

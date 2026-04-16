@@ -16,6 +16,9 @@ export interface ConflictsResult {
   count: number;
 }
 
+/**
+ * Lists unresolved conflicts that match the supplied tool filters.
+ */
 export function handleConflicts(
   db: Database,
   args: ConflictsArgs

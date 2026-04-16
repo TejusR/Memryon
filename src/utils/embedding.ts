@@ -1,5 +1,10 @@
 import type { Database } from "better-sqlite3";
 import type { InferenceSession, Tensor } from "onnxruntime-node";
+import {
+  MemryonError,
+  ValidationError,
+  withDbError,
+} from "./errors.js";
 
 export type EmbedFn = (
   text: string,
@@ -18,7 +23,7 @@ async function loadOrtModule(): Promise<OrtModule> {
   try {
     return await import("onnxruntime-node");
   } catch {
-    throw new Error(
+    throw new MemryonError(
       "onnxruntime-node is required for embedding generation. " +
         "Install it: npm install onnxruntime-node"
     );
@@ -43,18 +48,20 @@ function requireFloatOutputTensor(
   const outputTensor = results["last_hidden_state"] ?? results["output"];
 
   if (outputTensor === undefined) {
-    throw new Error(
+    throw new MemryonError(
       "Embedding model output must expose 'last_hidden_state' or 'output'"
     );
   }
 
   if (!(outputTensor.data instanceof Float32Array)) {
-    throw new Error("Embedding model output tensor must contain Float32 data");
+    throw new MemryonError(
+      "Embedding model output tensor must contain Float32 data"
+    );
   }
 
   const [, seqLen, hiddenSize] = outputTensor.dims;
   if (seqLen === undefined || hiddenSize === undefined) {
-    throw new Error("Embedding model output tensor must be rank-3");
+    throw new MemryonError("Embedding model output tensor must be rank-3");
   }
 
   return {
@@ -73,6 +80,9 @@ function requireFloatOutputTensor(
 // Tracks modelVersion so callers can store it alongside the embedding blob.
 // ---------------------------------------------------------------------------
 
+/**
+ * Generates an embedding for text with the configured ONNX model version.
+ */
 export async function generateEmbedding(
   text: string,
   modelVersion: string
@@ -135,6 +145,9 @@ export interface ReembedResult {
   remaining: number;
 }
 
+/**
+ * Re-embeds active memories whose stored embedding model version is out of date.
+ */
 export async function reembedMemories(
   db: Database,
   options: ReembedOptions
@@ -145,17 +158,23 @@ export async function reembedMemories(
     embedFn = generateEmbedding,
   } = options;
 
-  if (!newModelVersion) throw new Error("newModelVersion is required");
-  if (batchSize <= 0) throw new Error("batchSize must be positive");
+  if (!newModelVersion) {
+    throw new ValidationError("newModelVersion is required");
+  }
+  if (batchSize <= 0) {
+    throw new ValidationError("batchSize must be positive");
+  }
 
-  const totalRow = db
-    .prepare<[string], { cnt: number }>(
-      `SELECT COUNT(*) AS cnt FROM memories
-       WHERE invalidated_at IS NULL
-         AND valid_until IS NULL
-         AND (embedding_model_version IS NULL OR embedding_model_version != ?)`
-    )
-    .get(newModelVersion);
+  const totalRow = withDbError("counting memories that need re-embedding", () =>
+    db
+      .prepare<[string], { cnt: number }>(
+        `SELECT COUNT(*) AS cnt FROM memories
+         WHERE invalidated_at IS NULL
+           AND valid_until IS NULL
+           AND (embedding_model_version IS NULL OR embedding_model_version != ?)`
+      )
+      .get(newModelVersion)
+  );
 
   const total = totalRow?.cnt ?? 0;
 
@@ -163,16 +182,18 @@ export async function reembedMemories(
     return { reembedded_count: 0, remaining: 0 };
   }
 
-  const batch = db
-    .prepare<[string, number], { id: string; content: string }>(
-      `SELECT id, content FROM memories
-       WHERE invalidated_at IS NULL
-         AND valid_until IS NULL
-         AND (embedding_model_version IS NULL OR embedding_model_version != ?)
-       ORDER BY recorded_at ASC
-       LIMIT ?`
-    )
-    .all(newModelVersion, batchSize);
+  const batch = withDbError("loading memories for re-embedding", () =>
+    db
+      .prepare<[string, number], { id: string; content: string }>(
+        `SELECT id, content FROM memories
+         WHERE invalidated_at IS NULL
+           AND valid_until IS NULL
+           AND (embedding_model_version IS NULL OR embedding_model_version != ?)
+         ORDER BY recorded_at ASC
+         LIMIT ?`
+      )
+      .all(newModelVersion, batchSize)
+  );
 
   const updates: Array<{ id: string; embedding: Buffer }> = [];
 
@@ -181,18 +202,20 @@ export async function reembedMemories(
     updates.push({ id: row.id, embedding: Buffer.from(vec.buffer) });
   }
 
-  const applyUpdates = db.transaction(() => {
-    const stmt = db.prepare(
-      `UPDATE memories
-       SET embedding = ?, embedding_model_version = ?
-       WHERE id = ?`
-    );
-    for (const { id, embedding } of updates) {
-      stmt.run(embedding, newModelVersion, id);
-    }
-  });
+  withDbError("writing refreshed embeddings", () => {
+    const applyUpdates = db.transaction(() => {
+      const stmt = db.prepare(
+        `UPDATE memories
+         SET embedding = ?, embedding_model_version = ?
+         WHERE id = ?`
+      );
+      for (const { id, embedding } of updates) {
+        stmt.run(embedding, newModelVersion, id);
+      }
+    });
 
-  applyUpdates();
+    applyUpdates();
+  });
 
   return {
     reembedded_count: batch.length,

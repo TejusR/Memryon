@@ -1,6 +1,10 @@
 import type { Database } from "better-sqlite3";
 import { ulid } from "ulid";
 import { getDb } from "../db/connection.js";
+import {
+  ScopeViolationError,
+  withDbError,
+} from "../utils/errors.js";
 
 export type CandidateScope = "agent" | "project" | "global";
 export type CandidateType = "entity" | "fact" | "decision" | "preference";
@@ -159,6 +163,9 @@ function resolveDatabase(defaultPath?: string): Database {
   return getDb(defaultPath ?? process.env.MEMRYON_DB_PATH ?? "memryon.db");
 }
 
+/**
+ * Extracts candidate facts from a turn and buffers them for slow-path consolidation.
+ */
 export function extractCandidates(
   turn: string,
   agentId: string,
@@ -167,6 +174,9 @@ export function extractCandidates(
   scope: CandidateScope,
   projectId?: string
 ): ExtractCandidatesResult;
+/**
+ * Extracts candidate facts from a turn with an explicit database handle.
+ */
 export function extractCandidates(
   db: Database,
   turn: string,
@@ -176,6 +186,9 @@ export function extractCandidates(
   scope: CandidateScope,
   projectId?: string
 ): ExtractCandidatesResult;
+/**
+ * Extracts candidate facts from a turn and persists them into the candidate buffer.
+ */
 export function extractCandidates(
   dbOrTurn: Database | string,
   turnOrAgentId: string,
@@ -195,10 +208,10 @@ export function extractCandidates(
   const projectId = hasDb ? maybeProjectId : scopeOrProjectId;
 
   if (!SCOPE_VALUES.has(scope)) {
-    throw new Error(`Unsupported scope '${scope}'`);
+    throw new ScopeViolationError(`Unsupported scope '${scope}'`);
   }
   if (scope === "project" && !projectId) {
-    throw new Error("projectId is required when scope is 'project'");
+    throw new ScopeViolationError("projectId is required when scope is 'project'");
   }
 
   const drafts = dedupeCandidates(buildCandidateDrafts(turn));
@@ -206,31 +219,33 @@ export function extractCandidates(
     return { candidates_buffered: 0 };
   }
 
-  const insertCandidate = db.prepare(
-    `INSERT INTO candidate_buffer (
-       id, user_id, content, source_turn, candidate_type,
-       agent_id, framework, session_id, scope, project_id, status
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')`
-  );
+  withDbError("buffering fast-path candidates", () => {
+    const insertCandidate = db.prepare(
+      `INSERT INTO candidate_buffer (
+         id, user_id, content, source_turn, candidate_type,
+         agent_id, framework, session_id, scope, project_id, status
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')`
+    );
 
-  const insertMany = db.transaction((rows: CandidateDraft[]) => {
-    for (const row of rows) {
-      insertCandidate.run(
-        ulid(),
-        null,
-        row.content,
-        turn,
-        row.candidateType,
-        agentId,
-        framework,
-        sessionId,
-        scope,
-        scope === "project" ? projectId ?? null : null
-      );
-    }
+    const insertMany = db.transaction((rows: CandidateDraft[]) => {
+      for (const row of rows) {
+        insertCandidate.run(
+          ulid(),
+          null,
+          row.content,
+          turn,
+          row.candidateType,
+          agentId,
+          framework,
+          sessionId,
+          scope,
+          scope === "project" ? projectId ?? null : null
+        );
+      }
+    });
+
+    insertMany(drafts);
   });
-
-  insertMany(drafts);
 
   return { candidates_buffered: drafts.length };
 }

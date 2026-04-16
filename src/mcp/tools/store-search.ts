@@ -24,6 +24,9 @@ export interface StoreSearchResult {
   items: Array<PublicStoreItem & { score: number | null }>;
 }
 
+/**
+ * Searches LangGraph store items beneath a namespace prefix for the resolved visibility context.
+ */
 export function handleStoreSearch(
   db: Database,
   rawArgs: unknown

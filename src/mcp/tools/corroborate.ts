@@ -14,6 +14,9 @@ export interface CorroborateResult {
   corroboration_count: number;
 }
 
+/**
+ * Records a corroboration and returns the latest corroboration count.
+ */
 export function handleCorroborate(
   db: Database,
   args: CorroborateArgs

@@ -38,6 +38,9 @@ export interface RememberResult {
 // Handler
 // ---------------------------------------------------------------------------
 
+/**
+ * Stores a memory and records any project or cross-scope conflicts detected for it.
+ */
 export function handleRemember(db: Database, args: RememberArgs): RememberResult {
   // Enforce membership when writing to a project scope.
   if (args.scope === "project") {

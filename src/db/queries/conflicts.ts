@@ -6,6 +6,11 @@ import {
   type ConflictFilters,
   type LogConflictInput,
 } from "../../mcp/schemas.js";
+import {
+  requireNonEmptyString,
+  requireRecord,
+  withDbError,
+} from "../../utils/errors.js";
 
 // ---------------------------------------------------------------------------
 // Row type
@@ -27,55 +32,68 @@ export interface ConflictRow {
 // logConflict
 // ---------------------------------------------------------------------------
 
-export function logConflict(
-  db: Database,
-  input: LogConflictInput
-): ConflictRow {
+/**
+ * Inserts a conflict row and returns the stored record.
+ */
+export function logConflict(db: Database, input: LogConflictInput): ConflictRow {
   const parsed = LogConflictInputSchema.parse(input);
   const id = ulid();
 
-  db.prepare(
-    `INSERT INTO conflicts (id, memory_a, memory_b, project_id, conflict_type)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(
-    id,
-    parsed.memoryA,
-    parsed.memoryB,
-    parsed.projectId ?? null,
-    parsed.conflictType
-  );
+  return withDbError(
+    `logging conflict between '${parsed.memoryA}' and '${parsed.memoryB}'`,
+    () => {
+      db.prepare(
+        `INSERT INTO conflicts (id, memory_a, memory_b, project_id, conflict_type)
+         VALUES (?, ?, ?, ?, ?)`
+      ).run(
+        id,
+        parsed.memoryA,
+        parsed.memoryB,
+        parsed.projectId ?? null,
+        parsed.conflictType
+      );
 
-  return db
-    .prepare<[string], ConflictRow>(`SELECT * FROM conflicts WHERE id = ?`)
-    .get(id) as ConflictRow;
+      return requireRecord(
+        db
+          .prepare<[string], ConflictRow>(`SELECT * FROM conflicts WHERE id = ?`)
+          .get(id),
+        `Conflict '${id}' was not found after creation`
+      );
+    }
+  );
 }
 
 // ---------------------------------------------------------------------------
 // resolveConflict
 // ---------------------------------------------------------------------------
 
+/**
+ * Marks an unresolved conflict as resolved by a specific agent.
+ */
 export function resolveConflict(
   db: Database,
   conflictId: string,
   resolution: string,
   resolvedBy: string
 ): boolean {
-  if (!conflictId) throw new Error("conflictId is required");
-  if (!resolution) throw new Error("resolution is required");
-  if (!resolvedBy) throw new Error("resolvedBy is required");
+  const resolvedConflictId = requireNonEmptyString(conflictId, "conflictId");
+  const resolvedResolution = requireNonEmptyString(resolution, "resolution");
+  const resolvedResolvedBy = requireNonEmptyString(resolvedBy, "resolvedBy");
 
-  const result = db
-    .prepare(
-      `UPDATE conflicts
-       SET resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-           resolution  = ?,
-           resolved_by = ?
-       WHERE id = ?
-         AND resolved_at IS NULL`
-    )
-    .run(resolution, resolvedBy, conflictId);
+  return withDbError(`resolving conflict '${resolvedConflictId}'`, () => {
+    const result = db
+      .prepare(
+        `UPDATE conflicts
+         SET resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+             resolution  = ?,
+             resolved_by = ?
+         WHERE id = ?
+           AND resolved_at IS NULL`
+      )
+      .run(resolvedResolution, resolvedResolvedBy, resolvedConflictId);
 
-  return result.changes > 0;
+    return result.changes > 0;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +106,9 @@ export function resolveConflict(
 //   framework  — at least one side-memory must have this framework
 // ---------------------------------------------------------------------------
 
+/**
+ * Returns unresolved conflicts that match the supplied project, scope, time, or framework filters.
+ */
 export function getUnresolvedConflicts(
   db: Database,
   filters: ConflictFilters = {}
@@ -98,23 +119,25 @@ export function getUnresolvedConflicts(
   // scope and framework require looking at the referenced memory rows.
   // We LEFT JOIN both sides and use OR so a conflict is included if
   // either memory_a or memory_b matches the requested attribute.
-  return db
-    .prepare<unknown[], ConflictRow>(
-      `SELECT DISTINCT c.*
-       FROM conflicts c
-       LEFT JOIN memories ma ON c.memory_a = ma.id
-       LEFT JOIN memories mb ON c.memory_b = mb.id
-       WHERE c.resolved_at IS NULL
-         AND (? IS NULL OR c.project_id = ?)
-         AND (? IS NULL OR c.detected_at >= ?)
-         AND (? IS NULL OR ma.scope = ? OR mb.scope = ?)
-         AND (? IS NULL OR ma.framework = ? OR mb.framework = ?)
-       ORDER BY c.detected_at DESC`
-    )
-    .all(
-      projectId ?? null,   projectId ?? null,
-      since ?? null,       since ?? null,
-      scope ?? null,       scope ?? null,       scope ?? null,
-      framework ?? null,   framework ?? null,   framework ?? null
-    );
+  return withDbError("loading unresolved conflicts", () =>
+    db
+      .prepare<unknown[], ConflictRow>(
+        `SELECT DISTINCT c.*
+         FROM conflicts c
+         LEFT JOIN memories ma ON c.memory_a = ma.id
+         LEFT JOIN memories mb ON c.memory_b = mb.id
+         WHERE c.resolved_at IS NULL
+           AND (? IS NULL OR c.project_id = ?)
+           AND (? IS NULL OR c.detected_at >= ?)
+           AND (? IS NULL OR ma.scope = ? OR mb.scope = ?)
+           AND (? IS NULL OR ma.framework = ? OR mb.framework = ?)
+         ORDER BY c.detected_at DESC`
+      )
+      .all(
+        projectId ?? null,   projectId ?? null,
+        since ?? null,       since ?? null,
+        scope ?? null,       scope ?? null,       scope ?? null,
+        framework ?? null,   framework ?? null,   framework ?? null
+      )
+  );
 }

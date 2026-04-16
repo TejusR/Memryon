@@ -73,28 +73,46 @@ function collectJsonLines(
   lines.push(`${path.join(".") || "$"}: ${formatScalar(value)}`);
 }
 
+/**
+ * Stringifies JSON deterministically so equivalent objects produce identical text.
+ */
 export function stableJsonStringify(value: JsonValue): string {
   return JSON.stringify(sortJsonValue(value));
 }
 
+/**
+ * Flattens a JSON object into newline-delimited search text.
+ */
 export function flattenJsonToSearchText(value: JsonObject): string {
   const lines: string[] = [];
   collectJsonLines(value, [], lines);
   return lines.join("\n");
 }
 
+/**
+ * Joins a namespace tuple into the canonical internal path representation.
+ */
 export function namespaceToPath(namespace: readonly string[]): string {
   return namespace.join(PATH_SEPARATOR);
 }
 
+/**
+ * Returns true when a namespace path exactly matches or starts with a prefix path.
+ */
 export function pathHasPrefix(path: string, prefix: string): boolean {
   return path === prefix || path.startsWith(`${prefix}${PATH_SEPARATOR}`);
 }
 
+/**
+ * Returns true when a namespace path exactly matches or ends with a suffix path.
+ */
 export function pathHasSuffix(path: string, suffix: string): boolean {
   return path === suffix || path.endsWith(`${PATH_SEPARATOR}${suffix}`);
 }
 
+/**
+ * Truncates a namespace to the requested maximum depth.
+ */
 export function truncateNamespace(
   namespace: readonly string[],
   maxDepth?: number
@@ -106,6 +124,9 @@ export function truncateNamespace(
   return namespace.slice(0, maxDepth);
 }
 
+/**
+ * Returns true when every top-level filter field exactly matches the candidate object.
+ */
 export function jsonObjectMatchesFilter(
   candidate: JsonObject,
   filter: JsonObject | undefined

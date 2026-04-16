@@ -15,6 +15,9 @@ export interface ProjectContextResult {
   recent_activity: Array<{ id: string; content: string; agent_id: string; recorded_at: string }>;
 }
 
+/**
+ * Returns project metadata, membership, and a snapshot of recent project activity.
+ */
 export function handleProjectContext(
   db: Database,
   args: ProjectContextArgs

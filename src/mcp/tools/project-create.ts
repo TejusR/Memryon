@@ -14,6 +14,9 @@ export interface ProjectCreateResult {
   status: "created";
 }
 
+/**
+ * Creates a project and assigns the requesting agent as its owner.
+ */
 export function handleProjectCreate(
   db: Database,
   args: ProjectCreateArgs

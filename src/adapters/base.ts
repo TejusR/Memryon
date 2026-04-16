@@ -27,6 +27,7 @@ import {
   type RememberArgs,
   type RememberResult,
 } from "../mcp/tools/remember.js";
+import { MemryonError, errorMessage } from "../utils/errors.js";
 
 export type { CandidateScope };
 
@@ -101,6 +102,9 @@ export interface ToolCaller {
   callTool(request: ToolCallRequest): Promise<ToolCallResponse>;
 }
 
+/**
+ * Builds a memory client that calls the local handler functions directly.
+ */
 export function createHandlerBackedMemoryClient(db: Database): MemoryToolClient {
   return {
     async remember(args) {
@@ -124,18 +128,30 @@ function parseToolResult<T>(response: ToolCallResponse): T {
   );
 
   if (textBlock?.text === undefined) {
-    throw new Error("MCP tool response did not contain a text payload");
+    throw new MemryonError(
+      "MCP tool response did not contain a text payload"
+    );
   }
 
-  const parsed = JSON.parse(textBlock.text) as Record<string, unknown>;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(textBlock.text) as Record<string, unknown>;
+  } catch (error) {
+    throw new MemryonError(
+      `MCP tool response was not valid JSON: ${errorMessage(error)}`
+    );
+  }
 
   if (response.isError) {
-    throw new Error(String(parsed.error ?? "MCP tool call failed"));
+    throw new MemryonError(String(parsed.error ?? "MCP tool call failed"));
   }
 
   return parsed as T;
 }
 
+/**
+ * Builds a memory client that talks to Memryon through an MCP tool caller.
+ */
 export function createMcpToolClient(caller: ToolCaller): MemoryToolClient {
   return {
     async remember(args) {
@@ -245,7 +261,7 @@ export abstract class BaseFrameworkAdapter<TEvent>
   protected requireSession(sessionId: string): AdapterSessionState {
     const session = this.sessions.get(sessionId);
     if (session === undefined) {
-      throw new Error(
+      throw new MemryonError(
         `No active ${this.framework} session found for '${sessionId}'`
       );
     }
@@ -331,7 +347,7 @@ export abstract class BaseFrameworkAdapter<TEvent>
     operation: string,
     error: unknown
   ): AdapterErrorRow {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     return logAdapterError(this.db, {
       adapter: this.framework,
       error: `${operation}: ${message}`,

@@ -1,4 +1,11 @@
 import type { Database } from "better-sqlite3";
+import type { MemoryRow } from "./memories.js";
+import {
+  requireNonEmptyString,
+  requireRecord,
+  ValidationError,
+  withDbError,
+} from "../../utils/errors.js";
 
 // ---------------------------------------------------------------------------
 // Row type
@@ -14,45 +21,64 @@ export interface CorroborationRow {
 // corroborate — upsert: insert or refresh the timestamp on conflict
 // ---------------------------------------------------------------------------
 
+/**
+ * Inserts or refreshes a corroboration from an agent for the given memory.
+ */
 export function corroborate(
   db: Database,
   memoryId: string,
   agentId: string
 ): CorroborationRow {
-  if (!memoryId) throw new Error("memoryId is required");
-  if (!agentId) throw new Error("agentId is required");
+  const resolvedMemoryId = requireNonEmptyString(memoryId, "memoryId");
+  const resolvedAgentId = requireNonEmptyString(agentId, "agentId");
 
-  db.prepare(
-    `INSERT INTO corroborations (memory_id, agent_id, corroborated_at)
-     VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-     ON CONFLICT (memory_id, agent_id)
-     DO UPDATE SET corroborated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
-  ).run(memoryId, agentId);
+  return withDbError(
+    `corroborating memory '${resolvedMemoryId}' for agent '${resolvedAgentId}'`,
+    () => {
+      db.prepare(
+        `INSERT INTO corroborations (memory_id, agent_id, corroborated_at)
+         VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         ON CONFLICT (memory_id, agent_id)
+         DO UPDATE SET corroborated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+      ).run(resolvedMemoryId, resolvedAgentId);
 
-  return db
-    .prepare<[string, string], CorroborationRow>(
-      `SELECT * FROM corroborations WHERE memory_id = ? AND agent_id = ?`
-    )
-    .get(memoryId, agentId) as CorroborationRow;
+      return requireRecord(
+        db
+          .prepare<[string, string], CorroborationRow>(
+            `SELECT * FROM corroborations WHERE memory_id = ? AND agent_id = ?`
+          )
+          .get(resolvedMemoryId, resolvedAgentId),
+        `Corroboration for memory '${resolvedMemoryId}' and agent '${resolvedAgentId}' was not found after upsert`
+      );
+    }
+  );
 }
 
 // ---------------------------------------------------------------------------
 // getCorroborationCount
 // ---------------------------------------------------------------------------
 
+/**
+ * Counts how many agents have corroborated a memory.
+ */
 export function getCorroborationCount(
   db: Database,
   memoryId: string
 ): number {
-  if (!memoryId) throw new Error("memoryId is required");
+  const resolvedMemoryId = requireNonEmptyString(memoryId, "memoryId");
 
-  const row = db
-    .prepare<[string], { cnt: number }>(
-      `SELECT COUNT(*) AS cnt FROM corroborations WHERE memory_id = ?`
-    )
-    .get(memoryId);
+  return withDbError(
+    `counting corroborations for memory '${resolvedMemoryId}'`,
+    () => {
+      const row = db
+        .prepare<[string], { cnt: number }>(
+          `SELECT COUNT(*) AS cnt FROM corroborations WHERE memory_id = ?`
+        )
+        .get(resolvedMemoryId);
 
-  return row?.cnt ?? 0;
+      return row?.cnt ?? 0;
+    }
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -62,37 +88,42 @@ export function getCorroborationCount(
 //   1. Were recorded more than `staleDays` ago, AND
 //   2. Have NOT been corroborated within the last `corroborationWindowDays`.
 // ---------------------------------------------------------------------------
-
-import type { MemoryRow } from "./memories.js";
-
+/**
+ * Returns currently valid memories that have aged past the stale threshold without recent corroboration.
+ */
 export function getStaleMemories(
   db: Database,
   userId: string,
   staleDays = 30,
   corroborationWindowDays = 7
 ): MemoryRow[] {
-  if (!userId) throw new Error("userId is required");
-  if (staleDays <= 0) throw new Error("staleDays must be positive");
-  if (corroborationWindowDays <= 0)
-    throw new Error("corroborationWindowDays must be positive");
+  const resolvedUserId = requireNonEmptyString(userId, "userId");
+  if (staleDays <= 0) {
+    throw new ValidationError("staleDays must be positive");
+  }
+  if (corroborationWindowDays <= 0) {
+    throw new ValidationError("corroborationWindowDays must be positive");
+  }
 
   // Build the SQLite modifier strings from safe integer values.
   const staleModifier = `-${staleDays} days`;
   const corrModifier = `-${corroborationWindowDays} days`;
 
-  return db
-    .prepare<[string, string, string], MemoryRow>(
-      `SELECT m.* FROM memories m
-       WHERE m.user_id = ?
-         AND m.invalidated_at IS NULL
-         AND m.valid_until IS NULL
-         AND m.recorded_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
-         AND NOT EXISTS (
-           SELECT 1 FROM corroborations c
-           WHERE c.memory_id = m.id
-             AND c.corroborated_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
-         )
-       ORDER BY m.recorded_at ASC`
-    )
-    .all(userId, staleModifier, corrModifier);
+  return withDbError(`loading stale memories for user '${resolvedUserId}'`, () =>
+    db
+      .prepare<[string, string, string], MemoryRow>(
+        `SELECT m.* FROM memories m
+         WHERE m.user_id = ?
+           AND m.invalidated_at IS NULL
+           AND m.valid_until IS NULL
+           AND m.recorded_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
+           AND NOT EXISTS (
+             SELECT 1 FROM corroborations c
+             WHERE c.memory_id = m.id
+               AND c.corroborated_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
+           )
+         ORDER BY m.recorded_at ASC`
+      )
+      .all(resolvedUserId, staleModifier, corrModifier)
+  );
 }

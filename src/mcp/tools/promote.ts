@@ -14,6 +14,9 @@ export interface PromoteResult {
   new_scope: "project" | "global";
 }
 
+/**
+ * Promotes a memory to a wider scope and returns the tool payload.
+ */
 export function handlePromote(db: Database, args: PromoteArgs): PromoteResult {
   promoteMemory(db, {
     memoryId: args.memory_id,

@@ -19,6 +19,9 @@ export interface StoreListNamespacesResult {
   namespaces: string[][];
 }
 
+/**
+ * Lists distinct visible namespaces for the resolved LangGraph store context.
+ */
 export function handleStoreListNamespaces(
   db: Database,
   rawArgs: unknown

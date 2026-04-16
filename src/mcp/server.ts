@@ -2,7 +2,7 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { type Database } from "../db/connection.js";
-import { ScopeViolationError, ConflictError, MemryonError } from "../utils/errors.js";
+import { MemryonError } from "../utils/errors.js";
 import { handleRemember } from "./tools/remember.js";
 import { handleRecall } from "./tools/recall.js";
 import { handleForget } from "./tools/forget.js";
@@ -30,11 +30,7 @@ function toErrorResult(err: unknown): { content: [{ type: "text"; text: string }
 }
 
 function isKnownError(err: unknown): boolean {
-  return (
-    err instanceof MemryonError ||
-    err instanceof ScopeViolationError ||
-    err instanceof ConflictError
-  );
+  return err instanceof MemryonError;
 }
 
 function ok(result: unknown): { content: [{ type: "text"; text: string }] } {
@@ -45,6 +41,9 @@ function ok(result: unknown): { content: [{ type: "text"; text: string }] } {
 // Factory
 // ---------------------------------------------------------------------------
 
+/**
+ * Creates the stdio MCP server and registers the Memryon tool surface.
+ */
 export function createMcpServer(db: Database): McpServer {
   const server = new McpServer({
     name: "memryon",
@@ -419,6 +418,11 @@ const isMain =
   (await import("url")).fileURLToPath(import.meta.url) === process.argv[1];
 
 if (isMain) {
+  process.on("unhandledRejection", (reason) => {
+    console.error(reason);
+    process.exitCode = 1;
+  });
+
   main().catch((err) => {
     console.error(err);
     process.exit(1);

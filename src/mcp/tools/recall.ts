@@ -29,6 +29,9 @@ export interface RecallResult {
 // Handler
 // ---------------------------------------------------------------------------
 
+/**
+ * Runs the recall pipeline and returns results plus a scope-level breakdown.
+ */
 export function handleRecall(db: Database, args: RecallArgs): RecallResult {
   const limit = args.top_k ?? 20;
 

@@ -12,6 +12,9 @@ export interface ProjectJoinResult {
   role: "owner" | "contributor" | "readonly";
 }
 
+/**
+ * Adds an agent to a project using the requested role.
+ */
 export function handleProjectJoin(
   db: Database,
   args: ProjectJoinArgs

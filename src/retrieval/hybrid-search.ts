@@ -9,6 +9,7 @@ import {
   type GraphTraversalResult,
 } from "./graph-traversal.js";
 import type { IntentWeights } from "./router.js";
+import { withDbError } from "../utils/errors.js";
 
 export interface HybridSearchInput {
   userId: string;
@@ -313,6 +314,9 @@ function aggregateGraphResults(
   });
 }
 
+/**
+ * Merges ranked result sets with reciprocal rank fusion using fixed source weights.
+ */
 export function reciprocalRankFuse(
   rowLookup: Map<string, ScoredMemoryRow>,
   rankedSources: Record<SearchSource, ScoredMemoryRow[]>
@@ -348,71 +352,76 @@ export function reciprocalRankFuse(
   return sortSearchResults([...fused.values()]);
 }
 
+/**
+ * Runs the hybrid Memryon retrieval pipeline across BM25, lexical-vector, and graph signals.
+ */
 export function hybridSearch(
   db: Database,
   input: HybridSearchInput
 ): HybridSearchResult[] {
-  const visibleRows = collectVisibleMemories(db, {
-    userId: input.userId,
-    agentId: input.agentId,
-    ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
-    ...(input.scope !== undefined ? { scope: input.scope } : {}),
+  return withDbError(`running hybrid search for user '${input.userId}'`, () => {
+    const visibleRows = collectVisibleMemories(db, {
+      userId: input.userId,
+      agentId: input.agentId,
+      ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+      ...(input.scope !== undefined ? { scope: input.scope } : {}),
+    });
+
+    if (visibleRows.length === 0) {
+      return [];
+    }
+
+    const visibleRowsById = new Map(visibleRows.map((row) => [row.id, row]));
+    const trimmedQuery = input.query.trim();
+
+    if (trimmedQuery.length === 0) {
+      return sortRankedRows(visibleRows)
+        .slice(0, input.limit)
+        .map((row) => ({
+          ...row,
+          score: 0,
+          source_breakdown: blankSources(),
+        }));
+    }
+
+    const sourceLimit = Math.max(input.limit * 3, 10);
+    const bm25Rows = runBm25Search(db, input, visibleRowsById, sourceLimit);
+    const vectorRows = runVectorSearch(visibleRows, trimmedQuery, sourceLimit);
+
+    const seedIds = new Set<string>();
+    for (const row of [...bm25Rows.slice(0, 5), ...vectorRows.slice(0, 5)]) {
+      seedIds.add(row.id);
+    }
+
+    const traversedRows: GraphTraversalResult[] = [];
+    for (const seedId of seedIds) {
+      traversedRows.push(
+        ...traverseGraphs(db, seedId, input.intentWeights, 2, {
+          visibleRows,
+        })
+      );
+    }
+
+    const graphRows = aggregateGraphResults(visibleRowsById, traversedRows)
+      .slice(0, sourceLimit)
+      .map((entry) => entry.row);
+
+    const fused = reciprocalRankFuse(visibleRowsById, {
+      bm25: bm25Rows,
+      vector: vectorRows,
+      graph: graphRows,
+    });
+
+    if (fused.length === 0) {
+      return sortRankedRows(visibleRows)
+        .slice(0, input.limit)
+        .map((row) => ({
+          ...row,
+          score: 0,
+          source_breakdown: blankSources(),
+        }));
+    }
+
+    return fused.slice(0, input.limit);
   });
-
-  if (visibleRows.length === 0) {
-    return [];
-  }
-
-  const visibleRowsById = new Map(visibleRows.map((row) => [row.id, row]));
-  const trimmedQuery = input.query.trim();
-
-  if (trimmedQuery.length === 0) {
-    return sortRankedRows(visibleRows)
-      .slice(0, input.limit)
-      .map((row) => ({
-        ...row,
-        score: 0,
-        source_breakdown: blankSources(),
-      }));
-  }
-
-  const sourceLimit = Math.max(input.limit * 3, 10);
-  const bm25Rows = runBm25Search(db, input, visibleRowsById, sourceLimit);
-  const vectorRows = runVectorSearch(visibleRows, trimmedQuery, sourceLimit);
-
-  const seedIds = new Set<string>();
-  for (const row of [...bm25Rows.slice(0, 5), ...vectorRows.slice(0, 5)]) {
-    seedIds.add(row.id);
-  }
-
-  const traversedRows: GraphTraversalResult[] = [];
-  for (const seedId of seedIds) {
-    traversedRows.push(
-      ...traverseGraphs(db, seedId, input.intentWeights, 2, {
-        visibleRows,
-      })
-    );
-  }
-
-  const graphRows = aggregateGraphResults(visibleRowsById, traversedRows)
-    .slice(0, sourceLimit)
-    .map((entry) => entry.row);
-
-  const fused = reciprocalRankFuse(visibleRowsById, {
-    bm25: bm25Rows,
-    vector: vectorRows,
-    graph: graphRows,
-  });
-
-  if (fused.length === 0) {
-    return sortRankedRows(visibleRows)
-      .slice(0, input.limit)
-      .map((row) => ({
-        ...row,
-        score: 0,
-        source_breakdown: blankSources(),
-      }));
-  }
-
-  return fused.slice(0, input.limit);
 }

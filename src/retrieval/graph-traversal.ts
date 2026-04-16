@@ -1,6 +1,7 @@
 import type { Database } from "../db/connection.js";
 import type { MemoryRow } from "../db/queries/memories.js";
 import type { IntentWeights } from "./router.js";
+import { withDbError } from "../utils/errors.js";
 
 export interface GraphScoreBreakdown {
   causal: number;
@@ -198,6 +199,9 @@ function buildEntityIndex(rows: MemoryRow[]): Map<string, Set<string>> {
   return entityIndex;
 }
 
+/**
+ * Traverses causal, temporal, entity, and semantic graph edges from a seed memory.
+ */
 export function traverseGraphs(
   db: Database,
   memoryId: string,
@@ -205,218 +209,236 @@ export function traverseGraphs(
   maxHops: number,
   options?: TraverseGraphsOptions
 ): GraphTraversalResult[] {
-  const rows = loadCandidateRows(db, options?.visibleRows);
-  const rowsById = new Map(rows.map((row) => [row.id, row]));
-  const seed = rowsById.get(memoryId);
+  return withDbError(`traversing graph neighbors for memory '${memoryId}'`, () => {
+    const rows = loadCandidateRows(db, options?.visibleRows);
+    const rowsById = new Map(rows.map((row) => [row.id, row]));
+    const seed = rowsById.get(memoryId);
 
-  if (seed === undefined) {
-    return [];
-  }
-
-  const maxNodes = options?.maxNodes ?? 50;
-  const results = new Map<string, MutableTraversalResult>();
-  const causalAdjacency = buildCausalAdjacency(rows);
-  const temporalRows = [...rows].sort((left, right) => {
-    const validFrom = left.valid_from.localeCompare(right.valid_from);
-    if (validFrom !== 0) {
-      return validFrom;
-    }
-    return left.recorded_at.localeCompare(right.recorded_at);
-  });
-  const temporalIndex = temporalRows.findIndex((row) => row.id === seed.id);
-  const entityIndex = buildEntityIndex(rows);
-  const entityKeysById = new Map(rows.map((row) => [row.id, extractEntityKeys(row)]));
-  const tokenCountsById = new Map(rows.map((row) => [row.id, tokenFrequency(row.content)]));
-
-  const addResult = (
-    candidateId: string,
-    dimension: keyof GraphScoreBreakdown,
-    contribution: number,
-    depth: number
-  ): boolean => {
-    if (candidateId === seed.id || contribution <= 0) {
-      return results.size >= maxNodes;
+    if (seed === undefined) {
+      return [];
     }
 
-    const row = rowsById.get(candidateId);
-    if (row === undefined) {
-      return results.size >= maxNodes;
-    }
+    const maxNodes = options?.maxNodes ?? 50;
+    const results = new Map<string, MutableTraversalResult>();
+    const causalAdjacency = buildCausalAdjacency(rows);
+    const temporalRows = [...rows].sort((left, right) => {
+      const validFrom = left.valid_from.localeCompare(right.valid_from);
+      if (validFrom !== 0) {
+        return validFrom;
+      }
+      return left.recorded_at.localeCompare(right.recorded_at);
+    });
+    const temporalIndex = temporalRows.findIndex((row) => row.id === seed.id);
+    const entityIndex = buildEntityIndex(rows);
+    const entityKeysById = new Map(
+      rows.map((row) => [row.id, extractEntityKeys(row)])
+    );
+    const tokenCountsById = new Map(
+      rows.map((row) => [row.id, tokenFrequency(row.content)])
+    );
 
-    const existing = results.get(candidateId);
-
-    if (existing === undefined) {
-      if (results.size >= maxNodes) {
-        return true;
+    const addResult = (
+      candidateId: string,
+      dimension: keyof GraphScoreBreakdown,
+      contribution: number,
+      depth: number
+    ): boolean => {
+      if (candidateId === seed.id || contribution <= 0) {
+        return results.size >= maxNodes;
       }
 
-      const created: MutableTraversalResult = {
-        row,
-        score: contribution,
-        hops: depth,
-        breakdown: blankBreakdown(),
-      };
-      created.breakdown[dimension] = contribution;
-      results.set(candidateId, created);
-      return results.size >= maxNodes;
-    }
-
-    existing.score += contribution;
-    existing.hops = Math.min(existing.hops, depth);
-    existing.breakdown[dimension] += contribution;
-    return results.size >= maxNodes;
-  };
-
-  const causalHopLimit = Math.min(Math.max(maxHops, 0), 2);
-  if (intentWeights.causal > 0 && causalHopLimit > 0) {
-    const queue: Array<{ id: string; depth: number }> = [{ id: seed.id, depth: 0 }];
-    const visited = new Set<string>([seed.id]);
-
-    while (queue.length > 0) {
-      const current = queue.shift();
-      if (current === undefined || current.depth >= causalHopLimit) {
-        continue;
+      const row = rowsById.get(candidateId);
+      if (row === undefined) {
+        return results.size >= maxNodes;
       }
 
-      const neighbors = [...(causalAdjacency.get(current.id) ?? [])];
-      for (const neighborId of neighbors) {
-        if (visited.has(neighborId)) {
+      const existing = results.get(candidateId);
+
+      if (existing === undefined) {
+        if (results.size >= maxNodes) {
+          return true;
+        }
+
+        const created: MutableTraversalResult = {
+          row,
+          score: contribution,
+          hops: depth,
+          breakdown: blankBreakdown(),
+        };
+        created.breakdown[dimension] = contribution;
+        results.set(candidateId, created);
+        return results.size >= maxNodes;
+      }
+
+      existing.score += contribution;
+      existing.hops = Math.min(existing.hops, depth);
+      existing.breakdown[dimension] += contribution;
+      return results.size >= maxNodes;
+    };
+
+    const causalHopLimit = Math.min(Math.max(maxHops, 0), 2);
+    if (intentWeights.causal > 0 && causalHopLimit > 0) {
+      const queue: Array<{ id: string; depth: number }> = [
+        { id: seed.id, depth: 0 },
+      ];
+      const visited = new Set<string>([seed.id]);
+
+      while (queue.length > 0) {
+        const current = queue.shift();
+        if (current === undefined || current.depth >= causalHopLimit) {
           continue;
         }
 
-        visited.add(neighborId);
-        const depth = current.depth + 1;
-        const capped = addResult(
-          neighborId,
-          "causal",
-          intentWeights.causal / depth,
-          depth
-        );
-        if (capped) {
-          break;
-        }
-        if (depth < causalHopLimit) {
-          queue.push({ id: neighborId, depth });
-        }
-      }
-
-      if (results.size >= maxNodes) {
-        break;
-      }
-    }
-  }
-
-  const temporalHopLimit = Math.min(Math.max(maxHops, 0), 1);
-  if (intentWeights.temporal > 0 && temporalHopLimit > 0 && temporalIndex >= 0) {
-    const previous = temporalRows[temporalIndex - 1];
-    const next = temporalRows[temporalIndex + 1];
-
-    if (previous !== undefined) {
-      addResult(previous.id, "temporal", intentWeights.temporal, 1);
-    }
-
-    if (results.size < maxNodes && next !== undefined) {
-      addResult(next.id, "temporal", intentWeights.temporal, 1);
-    }
-  }
-
-  const entityHopLimit = Math.min(Math.max(maxHops, 0), 2);
-  if (intentWeights.entity > 0 && entityHopLimit > 0) {
-    const queue: Array<{ id: string; depth: number }> = [{ id: seed.id, depth: 0 }];
-    const visited = new Set<string>([seed.id]);
-
-    while (queue.length > 0) {
-      const current = queue.shift();
-      if (current === undefined || current.depth >= entityHopLimit) {
-        continue;
-      }
-
-      const keys = entityKeysById.get(current.id) ?? [];
-      const neighborWeights = new Map<string, number>();
-
-      for (const key of keys) {
-        for (const neighborId of entityIndex.get(key) ?? []) {
-          if (neighborId === current.id) {
+        const neighbors = [...(causalAdjacency.get(current.id) ?? [])];
+        for (const neighborId of neighbors) {
+          if (visited.has(neighborId)) {
             continue;
           }
-          neighborWeights.set(neighborId, (neighborWeights.get(neighborId) ?? 0) + 1);
+
+          visited.add(neighborId);
+          const depth = current.depth + 1;
+          const capped = addResult(
+            neighborId,
+            "causal",
+            intentWeights.causal / depth,
+            depth
+          );
+          if (capped) {
+            break;
+          }
+          if (depth < causalHopLimit) {
+            queue.push({ id: neighborId, depth });
+          }
+        }
+
+        if (results.size >= maxNodes) {
+          break;
         }
       }
+    }
 
-      const rankedNeighbors = [...neighborWeights.entries()]
-        .sort((left, right) => right[1] - left[1])
-        .slice(0, 12);
+    const temporalHopLimit = Math.min(Math.max(maxHops, 0), 1);
+    if (
+      intentWeights.temporal > 0 &&
+      temporalHopLimit > 0 &&
+      temporalIndex >= 0
+    ) {
+      const previous = temporalRows[temporalIndex - 1];
+      const next = temporalRows[temporalIndex + 1];
 
-      for (const [neighborId, overlap] of rankedNeighbors) {
-        if (visited.has(neighborId)) {
+      if (previous !== undefined) {
+        addResult(previous.id, "temporal", intentWeights.temporal, 1);
+      }
+
+      if (results.size < maxNodes && next !== undefined) {
+        addResult(next.id, "temporal", intentWeights.temporal, 1);
+      }
+    }
+
+    const entityHopLimit = Math.min(Math.max(maxHops, 0), 2);
+    if (intentWeights.entity > 0 && entityHopLimit > 0) {
+      const queue: Array<{ id: string; depth: number }> = [
+        { id: seed.id, depth: 0 },
+      ];
+      const visited = new Set<string>([seed.id]);
+
+      while (queue.length > 0) {
+        const current = queue.shift();
+        if (current === undefined || current.depth >= entityHopLimit) {
           continue;
         }
 
-        visited.add(neighborId);
-        const depth = current.depth + 1;
-        const overlapWeight = overlap / Math.max(keys.length, 1);
+        const keys = entityKeysById.get(current.id) ?? [];
+        const neighborWeights = new Map<string, number>();
+
+        for (const key of keys) {
+          for (const neighborId of entityIndex.get(key) ?? []) {
+            if (neighborId === current.id) {
+              continue;
+            }
+            neighborWeights.set(
+              neighborId,
+              (neighborWeights.get(neighborId) ?? 0) + 1
+            );
+          }
+        }
+
+        const rankedNeighbors = [...neighborWeights.entries()]
+          .sort((left, right) => right[1] - left[1])
+          .slice(0, 12);
+
+        for (const [neighborId, overlap] of rankedNeighbors) {
+          if (visited.has(neighborId)) {
+            continue;
+          }
+
+          visited.add(neighborId);
+          const depth = current.depth + 1;
+          const overlapWeight = overlap / Math.max(keys.length, 1);
+          const capped = addResult(
+            neighborId,
+            "entity",
+            (intentWeights.entity * overlapWeight) / depth,
+            depth
+          );
+          if (capped) {
+            break;
+          }
+          if (depth < entityHopLimit) {
+            queue.push({ id: neighborId, depth });
+          }
+        }
+
+        if (results.size >= maxNodes) {
+          break;
+        }
+      }
+    }
+
+    if (intentWeights.semantic > 0 && maxHops > 0 && results.size < maxNodes) {
+      const seedTokens =
+        tokenCountsById.get(seed.id) ?? new Map<string, number>();
+      const semanticNeighbors = rows
+        .filter((row) => row.id !== seed.id)
+        .map((row) => ({
+          row,
+          similarity: cosineFromCounts(
+            seedTokens,
+            tokenCountsById.get(row.id) ?? new Map<string, number>()
+          ),
+        }))
+        .filter((candidate) => candidate.similarity > 0)
+        .sort((left, right) => right.similarity - left.similarity)
+        .slice(0, maxNodes);
+
+      for (const candidate of semanticNeighbors) {
         const capped = addResult(
-          neighborId,
-          "entity",
-          intentWeights.entity * overlapWeight / depth,
-          depth
+          candidate.row.id,
+          "semantic",
+          intentWeights.semantic * candidate.similarity,
+          1
         );
         if (capped) {
           break;
         }
-        if (depth < entityHopLimit) {
-          queue.push({ id: neighborId, depth });
-        }
-      }
-
-      if (results.size >= maxNodes) {
-        break;
       }
     }
-  }
 
-  if (intentWeights.semantic > 0 && maxHops > 0 && results.size < maxNodes) {
-    const seedTokens = tokenCountsById.get(seed.id) ?? new Map<string, number>();
-    const semanticNeighbors = rows
-      .filter((row) => row.id !== seed.id)
-      .map((row) => ({
-        row,
-        similarity: cosineFromCounts(
-          seedTokens,
-          tokenCountsById.get(row.id) ?? new Map<string, number>()
-        ),
+    return [...results.values()]
+      .map((entry) => ({
+        ...entry.row,
+        score: entry.score,
+        hops: entry.hops,
+        breakdown: entry.breakdown,
       }))
-      .filter((candidate) => candidate.similarity > 0)
-      .sort((left, right) => right.similarity - left.similarity)
-      .slice(0, maxNodes);
-
-    for (const candidate of semanticNeighbors) {
-      const capped = addResult(
-        candidate.row.id,
-        "semantic",
-        intentWeights.semantic * candidate.similarity,
-        1
-      );
-      if (capped) {
-        break;
-      }
-    }
-  }
-
-  return [...results.values()]
-    .map((entry) => ({
-      ...entry.row,
-      score: entry.score,
-      hops: entry.hops,
-      breakdown: entry.breakdown,
-    }))
-    .sort((left, right) => {
-      if (right.score !== left.score) {
-        return right.score - left.score;
-      }
-      if (left.hops !== right.hops) {
-        return left.hops - right.hops;
-      }
-      return right.recorded_at.localeCompare(left.recorded_at);
-    });
+      .sort((left, right) => {
+        if (right.score !== left.score) {
+          return right.score - left.score;
+        }
+        if (left.hops !== right.hops) {
+          return left.hops - right.hops;
+        }
+        return right.recorded_at.localeCompare(left.recorded_at);
+      });
+  });
 }

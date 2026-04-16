@@ -5,6 +5,7 @@ import {
   type MemoryRow,
 } from "../db/queries/memories.js";
 import type { MemoryFilters } from "../mcp/schemas.js";
+import { requireNonEmptyString } from "../utils/errors.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -57,14 +58,17 @@ function sortScoredRows(rows: ScoredMemoryRow[]): ScoredMemoryRow[] {
   return rows;
 }
 
+/**
+ * Collects visible memories for an agent, optionally restricted to one scope tier.
+ */
 export function collectVisibleMemories(
   db: Database,
   input: VisibleMemoryInput
 ): ScoredMemoryRow[] {
   const { userId, agentId, projectId, scope } = input;
 
-  if (!userId) throw new Error("userId is required");
-  if (!agentId) throw new Error("agentId is required");
+  requireNonEmptyString(userId, "userId");
+  requireNonEmptyString(agentId, "agentId");
 
   const rowsById = new Map<string, ScoredMemoryRow>();
   const addRows = (rows: MemoryRow[]) => {
@@ -130,8 +134,8 @@ export function scopedRecall(
 ): ScoredMemoryRow[] {
   const { userId, agentId, query, limit = 20 } = input;
 
-  if (!userId) throw new Error("userId is required");
-  if (!agentId) throw new Error("agentId is required");
+  requireNonEmptyString(userId, "userId");
+  requireNonEmptyString(agentId, "agentId");
 
   if (query === undefined) {
     return collectVisibleMemories(db, input).slice(0, limit);

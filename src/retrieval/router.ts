@@ -36,6 +36,9 @@ function normaliseScores(scores: IntentWeights): IntentWeights {
   };
 }
 
+/**
+ * Classifies a recall query into intent weights used to balance hybrid retrieval sources.
+ */
 export function classifyIntent(query: string): IntentWeights {
   const trimmed = query.trim();
 

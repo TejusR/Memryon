@@ -20,6 +20,9 @@ export interface StoreGetResult {
   item: PublicStoreItem | null;
 }
 
+/**
+ * Loads an exact LangGraph store item for the resolved visibility context.
+ */
 export function handleStoreGet(
   db: Database,
   rawArgs: unknown

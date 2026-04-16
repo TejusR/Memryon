@@ -118,6 +118,9 @@ export class OpenClawAdapter extends BaseFrameworkAdapter<OpenClawEvent> {
   }
 }
 
+/**
+ * Adapts an OpenClaw adapter instance into the ClawHub skill contract.
+ */
 export function createClawHubSkill(adapter: OpenClawAdapter): ClawHubSkill {
   return {
     name: "memryon-openclaw",

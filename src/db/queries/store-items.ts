@@ -13,6 +13,10 @@ import {
   truncateNamespace,
   type JsonObject,
 } from "../../utils/json.js";
+import {
+  requireRecord,
+  withDbError,
+} from "../../utils/errors.js";
 
 interface StoreItemRowRaw {
   id: string;
@@ -127,6 +131,9 @@ function toSearchResult(row: StoreSearchRowRaw): StoreSearchResult {
   };
 }
 
+/**
+ * Inserts a new current LangGraph store item row and returns the hydrated record.
+ */
 export function insertStoreItem(
   db: Database,
   input: InsertStoreItemInput
@@ -141,80 +148,95 @@ export function insertStoreItem(
       ? null
       : stableJsonStringify(parsed.metadata_json);
 
-  db.prepare(
-    `INSERT INTO store_items (
-       id, memory_id, user_id, scope, owner_id, project_id, agent_id,
-       framework, session_id, namespace_json, namespace_path, item_key,
-       value_json, metadata_json, search_text, created_at, updated_at, deleted_at
-     ) VALUES (
-       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
-       strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-       strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-       NULL
-     )`
-  ).run(
-    id,
-    parsed.memory_id,
-    parsed.user_id,
-    parsed.scope,
-    parsed.owner_id,
-    parsed.project_id ?? null,
-    parsed.agent_id,
-    parsed.framework ?? null,
-    parsed.session_id ?? null,
-    namespaceJson,
-    namespacePath,
-    parsed.key,
-    valueJson,
-    metadataJson,
-    parsed.search_text
-  );
+  return withDbError(`inserting store item '${id}'`, () => {
+    db.prepare(
+      `INSERT INTO store_items (
+         id, memory_id, user_id, scope, owner_id, project_id, agent_id,
+         framework, session_id, namespace_json, namespace_path, item_key,
+         value_json, metadata_json, search_text, created_at, updated_at, deleted_at
+       ) VALUES (
+         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
+         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+         NULL
+       )`
+    ).run(
+      id,
+      parsed.memory_id,
+      parsed.user_id,
+      parsed.scope,
+      parsed.owner_id,
+      parsed.project_id ?? null,
+      parsed.agent_id,
+      parsed.framework ?? null,
+      parsed.session_id ?? null,
+      namespaceJson,
+      namespacePath,
+      parsed.key,
+      valueJson,
+      metadataJson,
+      parsed.search_text
+    );
 
-  const row = db
-    .prepare<[string], StoreItemRowRaw>(`SELECT * FROM store_items WHERE id = ?`)
-    .get(id) as StoreItemRowRaw;
+    const row = requireRecord(
+      db
+        .prepare<[string], StoreItemRowRaw>(`SELECT * FROM store_items WHERE id = ?`)
+        .get(id),
+      `Store item '${id}' was not found after insertion`
+    );
 
-  return hydrateStoreItem(row);
+    return hydrateStoreItem(row);
+  });
 }
 
+/**
+ * Loads the current non-deleted store item for an exact visibility bucket plus namespace/key.
+ */
 export function getCurrentStoreItem(
   db: Database,
   identity: StoreItemIdentity
 ): StoreItemRow | undefined {
   const namespaceJson = JSON.stringify(identity.namespace);
-  const row = db
-    .prepare<unknown[], StoreItemRowRaw>(
-      `SELECT * FROM store_items
-       WHERE user_id = ?
-         AND scope = ?
-         AND owner_id = ?
-         AND namespace_json = ?
-         AND item_key = ?
-         AND deleted_at IS NULL`
-    )
-    .get(
-      identity.userId,
-      identity.scope,
-      identity.ownerId,
-      namespaceJson,
-      identity.key
-    );
+  const row = withDbError("loading current store item", () =>
+    db
+      .prepare<unknown[], StoreItemRowRaw>(
+        `SELECT * FROM store_items
+         WHERE user_id = ?
+           AND scope = ?
+           AND owner_id = ?
+           AND namespace_json = ?
+           AND item_key = ?
+           AND deleted_at IS NULL`
+      )
+      .get(
+        identity.userId,
+        identity.scope,
+        identity.ownerId,
+        namespaceJson,
+        identity.key
+      )
+  );
 
   return row === undefined ? undefined : hydrateStoreItem(row);
 }
 
+/**
+ * Marks a current store item row as deleted without removing historical data.
+ */
 export function retireStoreItem(db: Database, id: string): boolean {
-  const result = db
-    .prepare(
-      `UPDATE store_items
-       SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-       WHERE id = ?
-         AND deleted_at IS NULL`
-    )
-    .run(id);
+  return withDbError(`retiring store item '${id}'`, () => {
+    const result = db
+      .prepare(
+        `UPDATE store_items
+         SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?
+           AND deleted_at IS NULL`
+      )
+      .run(id);
 
-  return result.changes > 0;
+    return result.changes > 0;
+  });
 }
 
 function selectSearchRows(
@@ -318,12 +340,17 @@ function selectSearchRows(
         );
 }
 
+/**
+ * Searches current store items within a visibility bucket and namespace prefix.
+ */
 export function searchStoreItems(
   db: Database,
   args: SearchStoreItemsArgs
 ): StoreSearchResult[] {
   const applyLimitInSql = args.filter === undefined;
-  const rows = selectSearchRows(db, args, applyLimitInSql).map(toSearchResult);
+  const rows = withDbError("searching store items", () =>
+    selectSearchRows(db, args, applyLimitInSql).map(toSearchResult)
+  );
 
   if (args.filter === undefined) {
     return rows;
@@ -337,6 +364,9 @@ export function searchStoreItems(
     .slice(offset, offset + limit);
 }
 
+/**
+ * Lists distinct namespaces visible within a store visibility bucket.
+ */
 export function listStoreNamespaces(
   db: Database,
   args: ListStoreNamespacesArgs
@@ -346,27 +376,29 @@ export function listStoreNamespaces(
   const prefixPattern =
     prefixPath === undefined ? undefined : `${prefixPath}\u001f%`;
 
-  const rows = db
-    .prepare<unknown[], { namespace_json: string; namespace_path: string }>(
-      `SELECT namespace_json, namespace_path
-       FROM store_items
-       WHERE user_id = ?
-         AND scope = ?
-         AND owner_id = ?
-         AND deleted_at IS NULL
-         AND (
-           ? IS NULL OR namespace_path = ? OR namespace_path LIKE ?
-         )
-       ORDER BY namespace_path ASC`
-    )
-    .all(
-      args.userId,
-      args.scope,
-      args.ownerId,
-      prefixPath ?? null,
-      prefixPath ?? null,
-      prefixPattern ?? null
-    );
+  const rows = withDbError("listing store namespaces", () =>
+    db
+      .prepare<unknown[], { namespace_json: string; namespace_path: string }>(
+        `SELECT namespace_json, namespace_path
+         FROM store_items
+         WHERE user_id = ?
+           AND scope = ?
+           AND owner_id = ?
+           AND deleted_at IS NULL
+           AND (
+             ? IS NULL OR namespace_path = ? OR namespace_path LIKE ?
+           )
+         ORDER BY namespace_path ASC`
+      )
+      .all(
+        args.userId,
+        args.scope,
+        args.ownerId,
+        prefixPath ?? null,
+        prefixPath ?? null,
+        prefixPattern ?? null
+      )
+  );
 
   const suffixPath =
     args.suffix === undefined ? undefined : namespaceToPath(args.suffix);

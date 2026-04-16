@@ -172,6 +172,9 @@ export class HermesAdapter
   }
 }
 
+/**
+ * Adapts a Hermes adapter instance into the plugin shape expected by Hermes.
+ */
 export function createHermesMemoryProvider(
   adapter: HermesAdapter
 ): HermesMemoryProviderPlugin {

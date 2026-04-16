@@ -38,6 +38,9 @@ export interface PublicStoreItem {
   deleted_at: string | null;
 }
 
+/**
+ * Resolves the effective store scope, defaulting project IDs to project scope and everything else to agent scope.
+ */
 export function resolveStoreScope(
   explicitScope: StoreScope | undefined,
   projectId?: string
@@ -45,6 +48,9 @@ export function resolveStoreScope(
   return explicitScope ?? (projectId ? "project" : "agent");
 }
 
+/**
+ * Resolves the effective visibility bucket for a store request and enforces project membership.
+ */
 export function resolveStoreContext(
   db: Database,
   input: StoreContextInput
@@ -86,6 +92,9 @@ export function resolveStoreContext(
   };
 }
 
+/**
+ * Builds the flattened search text stored for a LangGraph namespace/key item.
+ */
 export function buildStoreSearchText(
   namespace: readonly string[],
   key: string,
@@ -101,6 +110,9 @@ export function buildStoreSearchText(
   ].join("\n");
 }
 
+/**
+ * Builds the backing MemCell content recorded for a LangGraph store update.
+ */
 export function buildStoreMemoryContent(
   namespace: readonly string[],
   key: string,
@@ -117,6 +129,9 @@ export function buildStoreMemoryContent(
   ].join("\n");
 }
 
+/**
+ * Converts an internal store row into the public tool response shape.
+ */
 export function toPublicStoreItem(
   row: NonNullable<ReturnType<typeof getCurrentStoreItem>>
 ): PublicStoreItem {
