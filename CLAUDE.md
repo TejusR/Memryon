@@ -2,7 +2,7 @@
 
 ## What This Is
 
-Memryon is a local-first, MCP-native memory operating system for multi-agent AI systems. It serves as the shared brain across OpenClaw, Hermes, Claude Code, Codex CLI, and any MCP-compatible agent. The core differentiator vs existing tools (MemClaw, memsearch) is **conflict-aware intelligence**: agent provenance, contradiction detection, causal reasoning, and scoped memory.
+Memryon is a local-first, MCP-native memory operating system for multi-agent AI systems. It serves as the shared brain across OpenClaw, Hermes, Claude Code, Codex, Codex CLI, LangGraph, and any MCP-compatible agent. The core differentiator vs existing tools (MemClaw, memsearch) is **conflict-aware intelligence**: agent provenance, contradiction detection, causal reasoning, and scoped memory.
 
 ## Architecture Overview
 
@@ -28,7 +28,9 @@ Queries fan out across scopes in priority order: project (highest) → agent →
 | `conflicts` | Contradiction log with project_id, conflict_type, resolution status |
 | `candidate_buffer` | Fast-path ingestion staging table (status: PENDING/ACCEPTED/REJECTED) |
 | `adapter_errors` | Per-framework failure logging |
+| `store_items` | Exact namespace/key/value rows for the LangGraph-native store backend, each linked to a backing `memory_id` |
 | `memories_fts` | FTS5 virtual table for full-text search |
+| `store_items_fts` | FTS5 virtual table for namespace-scoped LangGraph store search |
 
 ### Key Constraints & Invariants
 
@@ -38,6 +40,8 @@ Queries fan out across scopes in priority order: project (highest) → agent →
 - `agent_id` is always set on every write — provenance is never lost, even after promotion/demotion
 - `valid_from` / `valid_until` are bi-temporal — `valid_until = NULL` means currently valid
 - `invalidated_at` / `invalidated_by` track who killed a memory and when
+- `store_items` keeps one current row per `(scope, owner_id, namespace_json, item_key)` via a partial unique index where `deleted_at IS NULL`
+- LangGraph store writes still create backing MemCells with `framework='langgraph'` and `source_type='adapter:langgraph:store'`
 - Memory IDs are ULIDs (temporally sortable)
 - SQLite WAL mode for concurrent reads with serialized writes
 - All embeddings use sqlite-vec (NOT sqlite-vss, which is abandoned)
@@ -55,6 +59,20 @@ Queries fan out across scopes in priority order: project (highest) → agent →
 | `project_create` | `(name, description)` |
 | `project_join` | `(project_id, role?)` |
 | `project_context` | `(project_id)` |
+| `store_put` | `(namespace, key, value_json, user_id, agent_id, session_id?, scope?, project_id?, metadata_json?)` |
+| `store_get` | `(namespace, key, user_id, agent_id, scope?, project_id?)` |
+| `store_search` | `(namespace_prefix, user_id, agent_id, query?, limit?, offset?, scope?, project_id?, filter_json?)` |
+| `store_delete` | `(namespace, key, agent_id, user_id, scope?, project_id?)` |
+| `store_list_namespaces` | `(prefix?, suffix?, user_id, agent_id, max_depth?, limit?, offset?, scope?, project_id?)` |
+
+### LangGraph Connector
+
+- The native LangGraph connector lives in `python/src/memryon_langgraph` as an installable Python package named `memryon-langgraph`.
+- `MemryonStore` is the Python-first long-term `store=` backend for `graph.compile(store=...)`, and it talks to Memryon over the existing stdio MCP server.
+- `MemryonConfig` carries `user_id`, `agent_id`, and optional `project_id`, `scope`, `session_id`, `server_command`, `server_args`, and `env`. Scope defaults to `project` when `project_id` is present, otherwise `agent`.
+- `load_memryon_tools()` is the optional LangChain/LangGraph bridge for explicit semantic memory tools such as `remember`, `recall`, `conflicts`, `corroborate`, `project_context`, and `promote`. It hides the low-level `store_*` plumbing tools from the agent-facing tool list.
+- `store_put` performs exact upsert by `(scope, owner_id, namespace, key)`, flattens `value_json` into deterministic fast-path text for `candidate_buffer`, and links the current store row to a backing MemCell.
+- LangGraph support in v1 is long-term memory only. Checkpoints and thread history remain LangGraph-native.
 
 ### Conflict Detection
 
@@ -77,7 +95,7 @@ Queries fan out across scopes in priority order: project (highest) → agent →
 
 ## Tech Stack
 
-- **Language**: TypeScript (MCP server, adapters) + Python (embedding generation, consolidation worker)
+- **Language**: TypeScript (MCP server, adapters, LangGraph store tools) + Python (embedding generation, consolidation worker, LangGraph connector package)
 - **Database**: SQLite with FTS5, sqlite-vec, WAL mode
 - **Embeddings**: ONNX Runtime with a local model (track `embedding_model_version` per MemCell)
 - **MCP**: JSON-RPC 2.0 server over stdio
@@ -136,6 +154,12 @@ memryon/
     └── consolidation-worker.py
 ```
 
+LangGraph-specific files live in:
+- `src/mcp/tools/store-put.ts`, `store-get.ts`, `store-search.ts`, `store-delete.ts`, and `store-list-namespaces.ts`
+- `src/db/queries/store-items.ts` and `src/utils/json.ts`
+- `python/src/memryon_langgraph/config.py`, `store.py`, `mcp_client.py`, and `tools.py`
+- `python/examples/quickstart.py` and `python/examples/hybrid_agent.py`
+
 ## Code Style
 
 - Explicit types everywhere, no `any`
@@ -148,11 +172,12 @@ memryon/
 ## What "Done" Looks Like
 
 Each prompt targets a shippable increment. The system is done when:
-1. All 9 MCP tools work end-to-end against SQLite
+1. All core MCP tools, including the LangGraph `store_*` tools, work end-to-end against SQLite
 2. Scope visibility is enforced (agent can't read another agent's private memories)
 3. Conflict detection fires on contradictions within and across scopes
 4. Corroboration prevents duplicate memories
 5. Promotion respects trust_tier
 6. Retrieval fan-out returns scope-prioritized results
 7. All adapters can write memories with correct provenance
-8. Integration tests cover the multi-agent collaboration flow
+8. Integration tests cover the multi-agent collaboration flow and LangGraph store persistence
+9. `MemryonStore` works as a native LangGraph `store=` backend with exact namespace/key semantics
