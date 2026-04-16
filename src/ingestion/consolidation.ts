@@ -9,6 +9,7 @@ import {
 import { getProject } from "../db/queries/projects.js";
 import { handleRemember } from "../mcp/tools/remember.js";
 import { resolveByTrustTier } from "../scope/conflict-detection.js";
+import { runStalenessSweep } from "../utils/staleness.js";
 import type { CandidateBufferRow } from "./fast-path.js";
 
 type QualityGateAction = "ACCEPT" | "UPDATE" | "REJECT";
@@ -797,6 +798,7 @@ export async function runConsolidationCycle(
   }
 
   clusterMemScenes(db);
+  runStalenessSweep(db);
 
   return {
     processed,
