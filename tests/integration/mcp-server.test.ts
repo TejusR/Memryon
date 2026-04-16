@@ -136,6 +136,54 @@ describe("remember + recall round-trip", () => {
     expect(breakdown.project).toBe(0);
     expect(breakdown.global).toBe(0);
   });
+
+  it("returns a database decision and its causal chain for why-questions", async () => {
+    const root = insertMemory(getDb(DB), {
+      user_id: USER,
+      scope: "global",
+      agent_id: AGENT_HI,
+      content: "Postgres write contention kept blocking local-first development",
+    });
+    const decision = insertMemory(getDb(DB), {
+      user_id: USER,
+      scope: "global",
+      agent_id: AGENT_HI,
+      content: "We switched databases from Postgres to SQLite for the local-first build",
+      caused_by: root.id,
+    });
+    insertMemory(getDb(DB), {
+      user_id: USER,
+      scope: "global",
+      agent_id: AGENT_HI,
+      content: "The SQLite migration removed setup friction for every agent",
+      caused_by: decision.id,
+    });
+
+    const recResult = await client.callTool({
+      name: "recall",
+      arguments: {
+        user_id: USER,
+        agent_id: AGENT_HI,
+        query: "why did we switch databases",
+        top_k: 5,
+      },
+    });
+
+    expect(recResult.isError).toBeFalsy();
+    const recalled = parseText(recResult);
+    const results = recalled.results as Array<{
+      content: string;
+      source_breakdown: { bm25: number; vector: number; graph: number };
+    }>;
+
+    expect(results[0]?.content).toContain("switched databases");
+    expect(
+      results.some((row) => row.content.includes("write contention"))
+    ).toBe(true);
+    expect(
+      results.some((row) => row.source_breakdown.graph > 0)
+    ).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

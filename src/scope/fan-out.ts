@@ -29,6 +29,13 @@ export interface ScopedRecallInput {
   limit?: number;
 }
 
+export interface VisibleMemoryInput {
+  userId: string;
+  agentId: string;
+  projectId?: string;
+  scope?: "agent" | "project" | "global";
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -37,6 +44,72 @@ function priorityForScope(scope: "agent" | "project" | "global"): ScopePriority 
   if (scope === "project") return 1;
   if (scope === "agent") return 2;
   return 3;
+}
+
+function sortScoredRows(rows: ScoredMemoryRow[]): ScoredMemoryRow[] {
+  rows.sort((a, b) => {
+    if (a.scopePriority !== b.scopePriority) {
+      return a.scopePriority - b.scopePriority;
+    }
+    return b.recorded_at.localeCompare(a.recorded_at);
+  });
+
+  return rows;
+}
+
+export function collectVisibleMemories(
+  db: Database,
+  input: VisibleMemoryInput
+): ScoredMemoryRow[] {
+  const { userId, agentId, projectId, scope } = input;
+
+  if (!userId) throw new Error("userId is required");
+  if (!agentId) throw new Error("agentId is required");
+
+  const rowsById = new Map<string, ScoredMemoryRow>();
+  const addRows = (rows: MemoryRow[]) => {
+    for (const row of rows) {
+      if (!rowsById.has(row.id)) {
+        rowsById.set(row.id, {
+          ...row,
+          scopePriority: priorityForScope(row.scope),
+        });
+      }
+    }
+  };
+
+  if (scope === undefined || scope === "project") {
+    if (projectId !== undefined) {
+      addRows(
+        getValidMemories(db, {
+          user_id: userId,
+          scope: "project",
+          project_id: projectId,
+        })
+      );
+    }
+  }
+
+  if (scope === undefined || scope === "agent") {
+    addRows(
+      getValidMemories(db, {
+        user_id: userId,
+        scope: "agent",
+        agent_id: agentId,
+      })
+    );
+  }
+
+  if (scope === undefined || scope === "global") {
+    addRows(
+      getValidMemories(db, {
+        user_id: userId,
+        scope: "global",
+      })
+    );
+  }
+
+  return sortScoredRows([...rowsById.values()]);
 }
 
 // ---------------------------------------------------------------------------
@@ -60,12 +133,14 @@ export function scopedRecall(
   if (!userId) throw new Error("userId is required");
   if (!agentId) throw new Error("agentId is required");
 
+  if (query === undefined) {
+    return collectVisibleMemories(db, input).slice(0, limit);
+  }
+
   // Build a tier fetcher that delegates to FTS when a query is provided,
   // or falls back to recency ordering via getValidMemories.
   const fetchTier = (filters: MemoryFilters): MemoryRow[] =>
-    query
-      ? findByFTS(db, query, filters, limit)
-      : getValidMemories(db, filters, limit);
+    findByFTS(db, query, filters, limit);
 
   // Tier 1 — project-scoped: any member's memories in this project.
   const projectRows: MemoryRow[] = input.projectId !== undefined
@@ -106,14 +181,5 @@ export function scopedRecall(
     }
   }
 
-  // Primary sort: scopePriority ASC (project first).
-  // Secondary sort: recorded_at DESC (most recent first within a tier).
-  scored.sort((a, b) => {
-    if (a.scopePriority !== b.scopePriority) {
-      return a.scopePriority - b.scopePriority;
-    }
-    return b.recorded_at.localeCompare(a.recorded_at);
-  });
-
-  return scored.slice(0, limit);
+  return sortScoredRows(scored).slice(0, limit);
 }
