@@ -33,6 +33,7 @@ export interface MemoryRow {
   caused_by: string | null;
   supersedes: string | null;
   framework: string | null;
+  session_id: string | null;
   source_type: string;
 }
 
@@ -59,7 +60,7 @@ export function insertMemory(
        valid_from, valid_until, recorded_at,
        confidence, importance,
        caused_by, supersedes,
-       framework, source_type,
+       framework, session_id, source_type,
        embedding, embedding_model_version
      ) VALUES (
        ?, ?, ?, ?, ?,
@@ -67,7 +68,7 @@ export function insertMemory(
        ?, ?, ?,
        ?, ?,
        ?, ?,
-       ?, ?,
+       ?, ?, ?,
        ?, ?
      )`
   ).run(
@@ -87,6 +88,7 @@ export function insertMemory(
     parsed.caused_by ?? null,
     parsed.supersedes ?? null,
     parsed.framework ?? null,
+    parsed.session_id ?? null,
     parsed.source_type,
     parsed.embedding ?? null,
     parsed.embedding_model_version ?? null

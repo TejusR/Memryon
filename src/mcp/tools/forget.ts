@@ -5,7 +5,7 @@ import { MemryonError } from "../../utils/errors.js";
 export interface ForgetArgs {
   memcell_id: string;
   agent_id: string;
-  reason?: string;
+  reason?: string | undefined;
 }
 
 export interface ForgetResult {

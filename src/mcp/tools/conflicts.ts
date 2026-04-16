@@ -5,10 +5,10 @@ import {
 } from "../../db/queries/conflicts.js";
 
 export interface ConflictsArgs {
-  since?: string;
-  framework?: string;
-  project_id?: string;
-  scope?: "agent" | "project" | "global";
+  since?: string | undefined;
+  framework?: string | undefined;
+  project_id?: string | undefined;
+  scope?: "agent" | "project" | "global" | undefined;
 }
 
 export interface ConflictsResult {

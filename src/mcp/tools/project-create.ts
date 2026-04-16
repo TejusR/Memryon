@@ -4,7 +4,7 @@ import { addAgent } from "../../db/queries/projects.js";
 
 export interface ProjectCreateArgs {
   name: string;
-  description?: string;
+  description?: string | undefined;
   user_id: string;
   agent_id: string;
 }

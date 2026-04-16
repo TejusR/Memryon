@@ -9,12 +9,12 @@ import { scopedRecall, type ScoredMemoryRow } from "../../scope/fan-out.js";
 export interface RecallArgs {
   user_id: string;
   agent_id: string;
-  query?: string;
-  intent_hint?: string;
-  scope?: "agent" | "project" | "global";
-  project_id?: string;
-  framework_filter?: string;
-  top_k?: number;
+  query?: string | undefined;
+  intent_hint?: string | undefined;
+  scope?: "agent" | "project" | "global" | undefined;
+  project_id?: string | undefined;
+  framework_filter?: string | undefined;
+  top_k?: number | undefined;
 }
 
 export interface RecallResult {

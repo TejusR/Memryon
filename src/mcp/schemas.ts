@@ -27,6 +27,7 @@ const commonMemoryFields = {
   caused_by: z.string().optional(),
   supersedes: z.string().optional(),
   framework: z.string().optional(),
+  session_id: z.string().optional(),
   source_type: z.string().default("manual"),
   embedding: z.instanceof(Buffer).optional(),
   embedding_model_version: z.string().optional(),

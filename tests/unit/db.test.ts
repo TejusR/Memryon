@@ -34,8 +34,11 @@ describe("schema: table creation", () => {
       "adapter_errors",
       "agents",
       "candidate_buffer",
+      "conflict_log",
       "conflicts",
       "corroborations",
+      "memscene_memories",
+      "memscenes",
       "memories",
       "memories_fts",
       "project_agents",
@@ -164,6 +167,9 @@ describe("schema: indexes", () => {
       "idx_conflicts_project",
       "idx_corr_memory",
       "idx_pa_agent",
+      "idx_candidate_buffer_status",
+      "idx_conflict_log_project",
+      "idx_memscenes_scope",
     ];
     for (const idx of required) {
       expect(indexes, `expected index '${idx}' to exist`).toContain(idx);

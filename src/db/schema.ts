@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS memories (
 
   -- Adapter metadata
   framework              TEXT,
+  session_id             TEXT,
   source_type            TEXT NOT NULL DEFAULT 'manual',
 
   -- Scope constraints
@@ -94,15 +95,26 @@ CREATE TABLE IF NOT EXISTS conflicts (
 
 -- Fast-path ingestion staging
 CREATE TABLE IF NOT EXISTS candidate_buffer (
-  id         TEXT PRIMARY KEY,  -- ULID
-  content    TEXT NOT NULL,
-  agent_id   TEXT NOT NULL,
-  framework  TEXT,
-  session_id TEXT,
-  scope      TEXT NOT NULL CHECK (scope IN ('agent', 'project', 'global')),
-  project_id TEXT,
-  status     TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'ACCEPTED', 'REJECTED')),
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  id                  TEXT PRIMARY KEY,  -- ULID
+  user_id             TEXT,
+  content             TEXT NOT NULL,
+  source_turn         TEXT NOT NULL,
+  candidate_type      TEXT NOT NULL DEFAULT 'fact'
+                        CHECK (candidate_type IN ('entity', 'fact', 'decision', 'preference')),
+  agent_id            TEXT NOT NULL,
+  framework           TEXT,
+  session_id          TEXT,
+  scope               TEXT NOT NULL CHECK (scope IN ('agent', 'project', 'global')),
+  project_id          TEXT REFERENCES projects(id),
+  status              TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'ACCEPTED', 'REJECTED')),
+  review_required     INTEGER NOT NULL DEFAULT 0 CHECK (review_required IN (0, 1)),
+  decision_action     TEXT,
+  decision_reason     TEXT,
+  decision_confidence REAL,
+  processed_at        TEXT,
+  created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  CHECK (scope != 'project' OR project_id IS NOT NULL),
+  CHECK (scope = 'project' OR project_id IS NULL)
 );
 
 -- Per-framework failure logging
@@ -111,6 +123,45 @@ CREATE TABLE IF NOT EXISTS adapter_errors (
   adapter    TEXT NOT NULL,
   error      TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Detailed contradiction audit trail used by the consolidation worker
+CREATE TABLE IF NOT EXISTS conflict_log (
+  id                    TEXT PRIMARY KEY,  -- ULID
+  conflict_id           TEXT REFERENCES conflicts(id),
+  existing_memory_id    TEXT NOT NULL REFERENCES memories(id),
+  candidate_memory_id   TEXT NOT NULL REFERENCES memories(id),
+  existing_agent_id     TEXT NOT NULL REFERENCES agents(agent_id),
+  candidate_agent_id    TEXT NOT NULL REFERENCES agents(agent_id),
+  existing_framework    TEXT,
+  candidate_framework   TEXT,
+  project_id            TEXT REFERENCES projects(id),
+  conflict_type         TEXT NOT NULL,
+  resolution_status     TEXT NOT NULL DEFAULT 'pending'
+                          CHECK (resolution_status IN ('pending', 'resolved', 'flagged')),
+  resolution_reason     TEXT,
+  resolved_by           TEXT REFERENCES agents(agent_id),
+  detected_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- MemScene clustering metadata
+CREATE TABLE IF NOT EXISTS memscenes (
+  id             TEXT PRIMARY KEY,  -- ULID
+  scene_key      TEXT NOT NULL UNIQUE,
+  user_id        TEXT NOT NULL,
+  scope          TEXT NOT NULL CHECK (scope IN ('agent', 'project', 'global')),
+  project_id     TEXT REFERENCES projects(id),
+  summary        TEXT NOT NULL,
+  memory_count   INTEGER NOT NULL,
+  session_count  INTEGER NOT NULL,
+  created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS memscene_memories (
+  scene_id   TEXT NOT NULL REFERENCES memscenes(id) ON DELETE CASCADE,
+  memory_id  TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  PRIMARY KEY (scene_id, memory_id)
 );
 
 -- FTS5 virtual table for full-text search
@@ -170,6 +221,19 @@ CREATE INDEX IF NOT EXISTS idx_corr_memory
 -- Project membership lookup by agent
 CREATE INDEX IF NOT EXISTS idx_pa_agent
   ON project_agents(agent_id, project_id);
+
+-- Consolidation worker pending queue
+CREATE INDEX IF NOT EXISTS idx_candidate_buffer_status
+  ON candidate_buffer(status, created_at ASC);
+
+-- Conflict audit lookup by project
+CREATE INDEX IF NOT EXISTS idx_conflict_log_project
+  ON conflict_log(project_id, detected_at DESC)
+  WHERE project_id IS NOT NULL;
+
+-- MemScene lookup by scope and freshness
+CREATE INDEX IF NOT EXISTS idx_memscenes_scope
+  ON memscenes(user_id, scope, updated_at DESC);
 `;
 
 export function initSchema(db: Database): void {

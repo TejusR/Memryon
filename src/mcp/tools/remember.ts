@@ -17,12 +17,15 @@ export interface RememberArgs {
   agent_id: string;
   user_id: string;
   scope: "agent" | "project" | "global";
-  project_id?: string;
-  framework?: string;
-  session_id?: string;
-  importance_hint?: number;
-  content_type?: string;
-  tags?: string[];
+  project_id?: string | undefined;
+  framework?: string | undefined;
+  session_id?: string | undefined;
+  importance_hint?: number | undefined;
+  confidence?: number | undefined;
+  source_type?: string | undefined;
+  supersedes?: string | undefined;
+  content_type?: string | undefined;
+  tags?: string[] | undefined;
 }
 
 export interface RememberResult {
@@ -57,10 +60,14 @@ export function handleRemember(db: Database, args: RememberArgs): RememberResult
     user_id: args.user_id,
     agent_id: args.agent_id,
     content: args.content,
-    ...(args.content_type !== undefined ? { content_type: args.content_type } : {}),
-    ...(args.tags !== undefined ? { tags: args.tags } : {}),
+    content_type: args.content_type ?? "text/plain",
+    tags: args.tags ?? [],
+    confidence: args.confidence ?? 1,
+    importance: args.importance_hint ?? 0.5,
+    source_type: args.source_type ?? "manual",
     ...(args.framework !== undefined ? { framework: args.framework } : {}),
-    ...(args.importance_hint !== undefined ? { importance: args.importance_hint } : {}),
+    ...(args.session_id !== undefined ? { session_id: args.session_id } : {}),
+    ...(args.supersedes !== undefined ? { supersedes: args.supersedes } : {}),
   };
 
   const insertInput =

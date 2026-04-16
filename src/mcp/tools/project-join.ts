@@ -4,7 +4,7 @@ import { addAgent } from "../../db/queries/projects.js";
 export interface ProjectJoinArgs {
   project_id: string;
   agent_id: string;
-  role?: "owner" | "contributor" | "readonly";
+  role?: "owner" | "contributor" | "readonly" | undefined;
 }
 
 export interface ProjectJoinResult {

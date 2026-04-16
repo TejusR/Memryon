@@ -5,7 +5,7 @@ export interface PromoteArgs {
   memory_id: string;
   agent_id: string;
   new_scope: "project" | "global";
-  project_id?: string;
+  project_id?: string | undefined;
 }
 
 export interface PromoteResult {
