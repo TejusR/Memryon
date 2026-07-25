@@ -4,6 +4,7 @@ import {
   getValidMemories,
   type MemoryRow,
 } from "../db/queries/memories.js";
+import { isAgentMember } from "../db/queries/projects.js";
 import type { MemoryFilters } from "../mcp/schemas.js";
 import { requireNonEmptyString } from "../utils/errors.js";
 
@@ -35,6 +36,7 @@ export interface VisibleMemoryInput {
   agentId: string;
   projectId?: string;
   scope?: "agent" | "project" | "global";
+  limitPerScope?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -65,7 +67,7 @@ export function collectVisibleMemories(
   db: Database,
   input: VisibleMemoryInput
 ): ScoredMemoryRow[] {
-  const { userId, agentId, projectId, scope } = input;
+  const { userId, agentId, projectId, scope, limitPerScope = 50 } = input;
 
   requireNonEmptyString(userId, "userId");
   requireNonEmptyString(agentId, "agentId");
@@ -83,13 +85,16 @@ export function collectVisibleMemories(
   };
 
   if (scope === undefined || scope === "project") {
-    if (projectId !== undefined) {
+    if (
+      projectId !== undefined &&
+      isAgentMember(db, projectId, agentId)
+    ) {
       addRows(
         getValidMemories(db, {
           user_id: userId,
           scope: "project",
           project_id: projectId,
-        })
+        }, limitPerScope)
       );
     }
   }
@@ -100,7 +105,7 @@ export function collectVisibleMemories(
         user_id: userId,
         scope: "agent",
         agent_id: agentId,
-      })
+      }, limitPerScope)
     );
   }
 
@@ -109,7 +114,7 @@ export function collectVisibleMemories(
       getValidMemories(db, {
         user_id: userId,
         scope: "global",
-      })
+      }, limitPerScope)
     );
   }
 
@@ -147,7 +152,9 @@ export function scopedRecall(
     findByFTS(db, query, filters, limit);
 
   // Tier 1 — project-scoped: any member's memories in this project.
-  const projectRows: MemoryRow[] = input.projectId !== undefined
+  const projectRows: MemoryRow[] =
+    input.projectId !== undefined &&
+    isAgentMember(db, input.projectId, agentId)
     ? fetchTier({
         user_id: userId,
         scope: "project",

@@ -1,0 +1,124 @@
+{
+  "task": "Implement the SQLite API retry timeout and backoff policy",
+  "requesting_agent": "codex",
+  "writing_agent": "claude-code",
+  "memories": [
+    {
+      "key": "retry-count",
+      "content": "The SQLite API client retries transient failures twice.",
+      "scope": "project",
+      "kind": "decision",
+      "relevant": true
+    },
+    {
+      "key": "timeout-short",
+      "content": "The SQLite API timeout is three seconds.",
+      "scope": "project",
+      "kind": "constraint",
+      "relevant": true,
+      "conflict": "timeout"
+    },
+    {
+      "key": "timeout-long",
+      "content": "The SQLite API timeout is ten seconds.",
+      "scope": "project",
+      "kind": "constraint",
+      "relevant": true,
+      "conflict": "timeout"
+    },
+    {
+      "key": "backoff",
+      "content": "Use exponential backoff for transient API errors.",
+      "scope": "global",
+      "kind": "procedure",
+      "relevant": true
+    },
+    {
+      "key": "prepared-statements",
+      "content": "All SQLite API writes use prepared statements.",
+      "scope": "project",
+      "kind": "constraint",
+      "relevant": true
+    },
+    {
+      "key": "wal",
+      "content": "SQLite runs in WAL mode while API retries are active.",
+      "scope": "project",
+      "kind": "decision",
+      "relevant": true
+    },
+    {
+      "key": "stale-retry",
+      "content": "The SQLite API retries failures ten times.",
+      "scope": "project",
+      "kind": "decision",
+      "relevant": false,
+      "invalidated": true
+    },
+    {
+      "key": "private-secret",
+      "content": "The private SQLite API token is secret-123.",
+      "scope": "agent",
+      "kind": "observation",
+      "relevant": false,
+      "private_writer": true
+    },
+    {
+      "key": "old-port",
+      "content": "The SQLite API listens on port 3000.",
+      "scope": "project",
+      "kind": "decision",
+      "relevant": false,
+      "superseded_by": "new-port"
+    },
+    {
+      "key": "new-port",
+      "content": "The SQLite API listens on port 4310.",
+      "scope": "project",
+      "kind": "decision",
+      "relevant": false
+    },
+    {
+      "key": "css",
+      "content": "The settings screen uses a two-column CSS grid.",
+      "scope": "project",
+      "kind": "observation",
+      "relevant": false
+    },
+    {
+      "key": "logo",
+      "content": "The product logo has a transparent background.",
+      "scope": "global",
+      "kind": "observation",
+      "relevant": false
+    },
+    {
+      "key": "billing",
+      "content": "Billing invoices are generated on the first day.",
+      "scope": "project",
+      "kind": "observation",
+      "relevant": false
+    },
+    {
+      "key": "copy",
+      "content": "The onboarding headline says Start building.",
+      "scope": "project",
+      "kind": "observation",
+      "relevant": false
+    },
+    {
+      "key": "analytics",
+      "content": "Analytics events use snake case names.",
+      "scope": "global",
+      "kind": "constraint",
+      "relevant": false
+    },
+    {
+      "key": "email",
+      "content": "Welcome email delivery is handled by a queue.",
+      "scope": "project",
+      "kind": "observation",
+      "relevant": false
+    }
+  ]
+}

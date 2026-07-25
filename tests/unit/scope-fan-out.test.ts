@@ -190,6 +190,35 @@ describe("scopedRecall — agent-private isolation", () => {
   });
 });
 
+describe("scopedRecall — project membership", () => {
+  it("does not expose project memories to an agent outside the project", () => {
+    registerAgent(db, {
+      agentId: "agent-outsider",
+      displayName: "Outsider",
+      trustTier: 2,
+      capabilities: [],
+    });
+    insertMemory(db, {
+      user_id: USER,
+      scope: "project",
+      agent_id: AGENT_A,
+      project_id: PROJECT_ID,
+      content: "members only project context",
+    });
+
+    const results = scopedRecall(db, {
+      userId: USER,
+      agentId: "agent-outsider",
+      projectId: PROJECT_ID,
+      limit: 10,
+    });
+
+    expect(results.map((row) => row.content)).not.toContain(
+      "members only project context"
+    );
+  });
+});
+
 // ---------------------------------------------------------------------------
 // FTS query filtering
 // ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ export interface ClaudeCodeSessionStartedEvent
   extends AdapterSessionStartedEvent {
   framework: "claude-code";
   claudeMdPath?: string;
+  task?: string;
 }
 
 export interface ClaudeCodeSessionEndedEvent extends AdapterSessionEndedEvent {
@@ -29,13 +30,32 @@ export interface ClaudeCodePostToolUseEvent {
   importanceHint?: number;
 }
 
+export interface ClaudeCodeUserPromptSubmitEvent {
+  framework: "claude-code";
+  type: "UserPromptSubmit";
+  sessionId: string;
+  agentId: string;
+  userId: string;
+  projectId?: string;
+  prompt: string;
+}
+
+export interface ClaudeCodeStopEvent {
+  framework: "claude-code";
+  type: "Stop";
+  sessionId: string;
+}
+
 export type ClaudeCodeEvent =
   | ClaudeCodeSessionStartedEvent
   | ClaudeCodeSessionEndedEvent
-  | ClaudeCodePostToolUseEvent;
+  | ClaudeCodePostToolUseEvent
+  | ClaudeCodeUserPromptSubmitEvent
+  | ClaudeCodeStopEvent;
 
 export interface ClaudeCodeAdapterOptions {
   claudeMdPath?: string;
+  captureToolActivity?: boolean;
 }
 
 function isClaudeCodeEvent(event: unknown): event is ClaudeCodeEvent {
@@ -48,7 +68,9 @@ function isClaudeCodeEvent(event: unknown): event is ClaudeCodeEvent {
     value.framework === "claude-code" &&
     (value.type === "session.started" ||
       value.type === "session.ended" ||
-      value.type === "PostToolUse")
+      value.type === "PostToolUse" ||
+      value.type === "UserPromptSubmit" ||
+      value.type === "Stop")
   );
 }
 
@@ -69,6 +91,9 @@ export class ClaudeCodeAdapter extends BaseFrameworkAdapter<ClaudeCodeEvent> {
     if (event.type === "session.started") {
       const injectedContext = await this.buildInjectedContext(event);
       const session = this.createSession(event, injectedContext);
+      if (event.task !== undefined) {
+        session.currentTask = event.task;
+      }
 
       return {
         status: "session_started",
@@ -86,8 +111,76 @@ export class ClaudeCodeAdapter extends BaseFrameworkAdapter<ClaudeCodeEvent> {
       };
     }
 
+    if (event.type === "UserPromptSubmit") {
+      let session = this.getSession(event.sessionId);
+      if (session === undefined) {
+        session = this.createSession({
+          type: "session.started",
+          sessionId: event.sessionId,
+          agentId: event.agentId,
+          userId: event.userId,
+          ...(event.projectId !== undefined
+            ? { projectId: event.projectId }
+            : {}),
+        });
+      }
+      session.currentTask = event.prompt;
+      const context = await this.prepareForTask(
+        event.prompt,
+        session.userId,
+        session.agentId,
+        session.sessionId,
+        session.projectId
+      );
+      session.injectedContext = context;
+      return {
+        hookSpecificOutput: {
+          hookEventName: "UserPromptSubmit",
+          additionalContext: context,
+        },
+      };
+    }
+
+    if (event.type === "Stop") {
+      const session = this.requireSession(event.sessionId);
+      if (
+        session.substantiveActivity !== true ||
+        session.stopReminderIssued === true ||
+        this.hasRecordedHandoff(session.sessionId, session.agentId)
+      ) {
+        return { status: "continue" };
+      }
+      session.stopReminderIssued = true;
+      return {
+        decision: "block",
+        reason: [
+          "Before finishing, call memryon.record_handoff once with the decisions, constraints, failures, outcomes, and unresolved questions from this task.",
+          `Use user_id=${JSON.stringify(
+            session.userId
+          )}, agent_id=${JSON.stringify(
+            session.agentId
+          )}, framework="claude-code", session_id=${JSON.stringify(
+            session.sessionId
+          )}`,
+          ...(session.projectId !== undefined
+            ? [`and project_id=${JSON.stringify(session.projectId)}.`]
+            : ["."]),
+          "Do not include hidden reasoning.",
+        ].join(" "),
+      };
+    }
+
     const session = this.requireSession(event.sessionId);
+    session.substantiveActivity = true;
     const scope = this.detectScope(session.projectId);
+    if (this.options.captureToolActivity !== true) {
+      return {
+        status: "ignored",
+        scope,
+        capture_tool_activity: false,
+      };
+    }
+
     const content = this.buildToolMemoryContent(
       event.toolName,
       event.input,
@@ -95,7 +188,7 @@ export class ClaudeCodeAdapter extends BaseFrameworkAdapter<ClaudeCodeEvent> {
       "Claude Code tool"
     );
 
-    const result = await this.bufferAndRemember({
+    const captureInput = {
       content,
       agentId: session.agentId,
       userId: session.userId,
@@ -106,14 +199,13 @@ export class ClaudeCodeAdapter extends BaseFrameworkAdapter<ClaudeCodeEvent> {
         ? { importanceHint: event.importanceHint }
         : {}),
       sourceType: "adapter:claude-code:post-tool-use",
-    });
+    };
 
     return {
-      status: "captured",
-      memcell_id: result.remembered.memcell_id,
+      status: "buffered",
       scope,
       ...(session.projectId !== undefined ? { project_id: session.projectId } : {}),
-      candidates_buffered: result.candidatesBuffered,
+      candidates_buffered: this.bufferCandidateActivity(captureInput),
     };
   }
 
@@ -154,7 +246,57 @@ export class ClaudeCodeAdapter extends BaseFrameworkAdapter<ClaudeCodeEvent> {
       }
     }
 
+    const task = event.task ?? "Resume substantive work in this project";
+    const compiled = await this.prepareForTask(
+      task,
+      event.userId,
+      event.agentId,
+      event.sessionId,
+      event.projectId
+    );
+    if (compiled.length > 0) {
+      sections.push(compiled);
+    }
+
     return sections.join("\n\n").trim();
+  }
+
+  private async prepareForTask(
+    task: string,
+    userId: string,
+    agentId: string,
+    sessionId: string,
+    projectId?: string
+  ): Promise<string> {
+    if (this.client.prepareContext === undefined) {
+      return "";
+    }
+    try {
+      const result = await this.client.prepareContext({
+        task,
+        user_id: userId,
+        agent_id: agentId,
+        session_id: sessionId,
+        ...(projectId !== undefined ? { project_id: projectId } : {}),
+      });
+      return result.context;
+    } catch (error) {
+      this.recordError("prepare_context", error);
+      return "[Memryon warning: relevant context could not be loaded. Continuing without it.]";
+    }
+  }
+
+  private hasRecordedHandoff(sessionId: string, agentId: string): boolean {
+    return (
+      this.db
+        .prepare<[string, string], { present: number }>(
+          `SELECT 1 AS present
+           FROM handoffs
+           WHERE session_id = ? AND agent_id = ?
+           LIMIT 1`
+        )
+        .get(sessionId, agentId) !== undefined
+    );
   }
 
   private async readClaudeMd(filePath: string): Promise<string> {

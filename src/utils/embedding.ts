@@ -1,138 +1,31 @@
 import type { Database } from "better-sqlite3";
-import type { InferenceSession, Tensor } from "onnxruntime-node";
 import {
-  MemryonError,
-  ValidationError,
-  withDbError,
-} from "./errors.js";
+  EMBEDDING_DIMENSIONS,
+  TransformersEmbeddingProvider,
+} from "../models/providers.js";
+import { upsertMemoryVector } from "../retrieval/vector-index.js";
+import { ValidationError, withDbError } from "./errors.js";
 
 export type EmbedFn = (
   text: string,
   modelVersion: string
 ) => Promise<Float32Array>;
 
-type OrtModule = typeof import("onnxruntime-node");
-
-// ---------------------------------------------------------------------------
-// ONNX session cache - one session per model version
-// ---------------------------------------------------------------------------
-
-const sessionCache = new Map<string, InferenceSession>();
-
-async function loadOrtModule(): Promise<OrtModule> {
-  try {
-    return await import("onnxruntime-node");
-  } catch {
-    throw new MemryonError(
-      "onnxruntime-node is required for embedding generation. " +
-        "Install it: npm install onnxruntime-node"
-    );
-  }
-}
-
-async function loadOnnxSession(modelPath: string): Promise<InferenceSession> {
-  const existing = sessionCache.get(modelPath);
-  if (existing !== undefined) {
-    return existing;
-  }
-
-  const ort = await loadOrtModule();
-  const session = await ort.InferenceSession.create(modelPath);
-  sessionCache.set(modelPath, session);
-  return session;
-}
-
-function requireFloatOutputTensor(
-  results: Record<string, Tensor>
-): { data: Float32Array; dims: [number, number, number] } {
-  const outputTensor = results["last_hidden_state"] ?? results["output"];
-
-  if (outputTensor === undefined) {
-    throw new MemryonError(
-      "Embedding model output must expose 'last_hidden_state' or 'output'"
-    );
-  }
-
-  if (!(outputTensor.data instanceof Float32Array)) {
-    throw new MemryonError(
-      "Embedding model output tensor must contain Float32 data"
-    );
-  }
-
-  const [, seqLen, hiddenSize] = outputTensor.dims;
-  if (seqLen === undefined || hiddenSize === undefined) {
-    throw new MemryonError("Embedding model output tensor must be rank-3");
-  }
-
-  return {
-    data: outputTensor.data,
-    dims: [1, seqLen, hiddenSize],
-  };
-}
-
-// ---------------------------------------------------------------------------
-// generateEmbedding
-//
-// Runs text through an ONNX sentence-embedding model and returns a Float32Array.
-// Model path is resolved from MEMRYON_EMBEDDING_MODEL_PATH env var, falling
-// back to ./models/<modelVersion>.onnx.
-//
-// Tracks modelVersion so callers can store it alongside the embedding blob.
-// ---------------------------------------------------------------------------
+const defaultEmbeddingProvider = new TransformersEmbeddingProvider();
 
 /**
- * Generates an embedding for text with the configured ONNX model version.
+ * Generates an embedding through the pinned Transformers.js provider.
+ *
+ * modelVersion remains in the signature for backward compatibility with the
+ * re-embedding API. The provider reports the actual pinned version used by the
+ * background indexer.
  */
 export async function generateEmbedding(
   text: string,
-  modelVersion: string
+  _modelVersion: string
 ): Promise<Float32Array> {
-  const modelPath =
-    process.env.MEMRYON_EMBEDDING_MODEL_PATH ?? `./models/${modelVersion}.onnx`;
-
-  const [ort, session] = await Promise.all([
-    loadOrtModule(),
-    loadOnnxSession(modelPath),
-  ]);
-
-  // Minimal tokenisation: byte-encode each character as a token id.
-  // Replace with a proper tokenizer (e.g. @xenova/transformers) once available.
-  const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
-  const tokenIds = new BigInt64Array(
-    [...normalized].map((ch) => BigInt(ch.codePointAt(0) ?? 0))
-  );
-
-  const feeds: Record<string, Tensor> = {
-    input_ids: new ort.Tensor("int64", tokenIds, [1, tokenIds.length]),
-  };
-
-  const results = await session.run(feeds);
-  const { data: raw, dims } = requireFloatOutputTensor(results);
-  const [, seqLen, hiddenSize] = dims;
-  const pooled = new Float32Array(hiddenSize);
-
-  for (let s = 0; s < seqLen; s++) {
-    for (let h = 0; h < hiddenSize; h++) {
-      const current = pooled[h] ?? 0;
-      const value = raw[s * hiddenSize + h] ?? 0;
-      pooled[h] = current + value / seqLen;
-    }
-  }
-
-  return pooled;
+  return defaultEmbeddingProvider.embed(text);
 }
-
-// ---------------------------------------------------------------------------
-// reembedMemories
-//
-// Finds active memories whose embedding_model_version differs from
-// newModelVersion and re-embeds them in batches.
-//
-// Skips archived / invalidated memories (only re-embeds on access, per spec).
-// Idempotent: re-running with the same newModelVersion is a no-op.
-//
-// embedFn is injectable for testing; defaults to generateEmbedding.
-// ---------------------------------------------------------------------------
 
 export interface ReembedOptions {
   batchSize?: number;
@@ -177,7 +70,6 @@ export async function reembedMemories(
   );
 
   const total = totalRow?.cnt ?? 0;
-
   if (total === 0) {
     return { reembedded_count: 0, remaining: 0 };
   }
@@ -195,26 +87,34 @@ export async function reembedMemories(
       .all(newModelVersion, batchSize)
   );
 
-  const updates: Array<{ id: string; embedding: Buffer }> = [];
-
+  const updates: Array<{ id: string; vector: Float32Array }> = [];
   for (const row of batch) {
-    const vec = await embedFn(row.content, newModelVersion);
-    updates.push({ id: row.id, embedding: Buffer.from(vec.buffer) });
+    updates.push({
+      id: row.id,
+      vector: await embedFn(row.content, newModelVersion),
+    });
   }
 
   withDbError("writing refreshed embeddings", () => {
-    const applyUpdates = db.transaction(() => {
-      const stmt = db.prepare(
+    db.transaction(() => {
+      const fallbackUpdate = db.prepare(
         `UPDATE memories
          SET embedding = ?, embedding_model_version = ?
          WHERE id = ?`
       );
-      for (const { id, embedding } of updates) {
-        stmt.run(embedding, newModelVersion, id);
-      }
-    });
 
-    applyUpdates();
+      for (const { id, vector } of updates) {
+        if (vector.length === EMBEDDING_DIMENSIONS) {
+          upsertMemoryVector(db, id, vector, newModelVersion);
+        } else {
+          fallbackUpdate.run(
+            Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength),
+            newModelVersion,
+            id
+          );
+        }
+      }
+    })();
   });
 
   return {

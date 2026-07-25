@@ -17,6 +17,11 @@ import { handleStoreGet } from "./tools/store-get.js";
 import { handleStoreSearch } from "./tools/store-search.js";
 import { handleStoreDelete } from "./tools/store-delete.js";
 import { handleStoreListNamespaces } from "./tools/store-list-namespaces.js";
+import { handlePrepareContext } from "./tools/prepare-context.js";
+import { handleRecordHandoff } from "./tools/record-handoff.js";
+import { getDefaultDbPath } from "../config/paths.js";
+import { startEmbeddingWorker } from "../ingestion/embedding-worker.js";
+import { JsonObjectSchema } from "./schemas.js";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -67,11 +72,102 @@ export function createMcpServer(db: Database): McpServer {
         importance_hint: z.number().min(0).max(1).optional().describe("0-1 importance weight"),
         content_type: z.string().optional().describe("MIME type; defaults to text/plain"),
         tags: z.array(z.string()).optional().describe("Tag list"),
+        memory_kind: z
+          .enum([
+            "observation",
+            "decision",
+            "constraint",
+            "failure",
+            "outcome",
+            "unresolved_question",
+            "fact",
+            "preference",
+            "procedure",
+            "handoff_summary",
+          ])
+          .optional()
+          .describe("Typed memory category; defaults to observation"),
+        task_id: z.string().optional().describe("Task or handoff identifier"),
+        metadata_json: JsonObjectSchema
+          .optional()
+          .describe("Structured metadata"),
+        evidence_refs: z
+          .array(z.string().min(1))
+          .optional()
+          .describe("References supporting this memory"),
       },
     },
     async (args) => {
       try {
         return ok(handleRemember(db, args));
+      } catch (err) {
+        if (isKnownError(err)) return toErrorResult(err);
+        throw err;
+      }
+    }
+  );
+
+  server.registerTool(
+    "prepare_context",
+    {
+      description:
+        "Compile a task-aware, token-bounded evidence pack from visible memories.",
+      inputSchema: {
+        task: z.string().min(1).describe("The task the agent is about to perform"),
+        user_id: z.string().min(1).describe("Local user identity"),
+        agent_id: z.string().min(1).describe("Requesting agent identity"),
+        project_id: z.string().optional().describe("Current project identity"),
+        session_id: z.string().optional().describe("Current session identity"),
+        token_budget: z
+          .number()
+          .int()
+          .min(256)
+          .max(32_000)
+          .optional()
+          .describe("Maximum estimated context tokens; defaults to 3000"),
+        top_k: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe("Maximum selected memories; defaults to 12"),
+      },
+    },
+    async (args) => {
+      try {
+        return ok(await handlePrepareContext(db, args));
+      } catch (err) {
+        if (isKnownError(err)) return toErrorResult(err);
+        throw err;
+      }
+    }
+  );
+
+  server.registerTool(
+    "record_handoff",
+    {
+      description:
+        "Record a concise structured task handoff as independently retrievable memories.",
+      inputSchema: {
+        task: z.string().min(1).describe("Task that was performed"),
+        summary: z.string().default("").describe("Concise task summary"),
+        user_id: z.string().min(1).describe("Local user identity"),
+        agent_id: z.string().min(1).describe("Writing agent identity"),
+        project_id: z.string().optional().describe("Current project identity"),
+        session_id: z.string().optional().describe("Current session identity"),
+        framework: z.string().optional().describe("Originating agent framework"),
+        decisions: z.array(z.string().min(1)).optional(),
+        constraints: z.array(z.string().min(1)).optional(),
+        failures: z.array(z.string().min(1)).optional(),
+        outcomes: z.array(z.string().min(1)).optional(),
+        unresolved_questions: z.array(z.string().min(1)).optional(),
+        evidence_refs: z.array(z.string().min(1)).optional(),
+      },
+    },
+    async (args) => {
+      try {
+        return ok(handleRecordHandoff(db, args));
       } catch (err) {
         if (isKnownError(err)) return toErrorResult(err);
         throw err;
@@ -402,10 +498,11 @@ export function createMcpServer(db: Database): McpServer {
 // Entry point (stdio transport for production use)
 // ---------------------------------------------------------------------------
 
-async function main(): Promise<void> {
+export async function serveMcpServer(): Promise<void> {
   const { getDb } = await import("../db/connection.js");
-  const dbPath = process.env["MEMRYON_DB_PATH"] ?? "memryon.db";
+  const dbPath = getDefaultDbPath();
   const db = getDb(dbPath);
+  startEmbeddingWorker(db);
 
   const server = createMcpServer(db);
   const transport = new StdioServerTransport();
@@ -423,7 +520,7 @@ if (isMain) {
     process.exitCode = 1;
   });
 
-  main().catch((err) => {
+  serveMcpServer().catch((err) => {
     console.error(err);
     process.exit(1);
   });

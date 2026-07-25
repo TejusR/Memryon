@@ -40,6 +40,20 @@ export interface MemoryRow {
   framework: string | null;
   session_id: string | null;
   source_type: string;
+  memory_kind:
+    | "observation"
+    | "decision"
+    | "constraint"
+    | "failure"
+    | "outcome"
+    | "unresolved_question"
+    | "fact"
+    | "preference"
+    | "procedure"
+    | "handoff_summary";
+  task_id: string | null;
+  metadata_json: string;
+  evidence_refs_json: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -55,6 +69,8 @@ export function insertMemory(db: Database, input: InsertMemoryInput): MemoryRow 
   const now = new Date().toISOString();
   const projectId = "project_id" in parsed ? parsed.project_id : null;
   const tags = JSON.stringify(parsed.tags);
+  const metadataJson = JSON.stringify(parsed.metadata_json);
+  const evidenceRefsJson = JSON.stringify(parsed.evidence_refs);
 
   return withDbError(`inserting memory '${id}'`, () => {
     db.prepare(
@@ -65,6 +81,7 @@ export function insertMemory(db: Database, input: InsertMemoryInput): MemoryRow 
          confidence, importance,
          caused_by, supersedes,
          framework, session_id, source_type,
+         memory_kind, task_id, metadata_json, evidence_refs_json,
          embedding, embedding_model_version
        ) VALUES (
          ?, ?, ?, ?, ?,
@@ -73,6 +90,7 @@ export function insertMemory(db: Database, input: InsertMemoryInput): MemoryRow 
          ?, ?,
          ?, ?,
          ?, ?, ?,
+         ?, ?, ?, ?,
          ?, ?
        )`
     ).run(
@@ -94,6 +112,10 @@ export function insertMemory(db: Database, input: InsertMemoryInput): MemoryRow 
       parsed.framework ?? null,
       parsed.session_id ?? null,
       parsed.source_type,
+      parsed.memory_kind,
+      parsed.task_id ?? null,
+      metadataJson,
+      evidenceRefsJson,
       parsed.embedding ?? null,
       parsed.embedding_model_version ?? null
     );
@@ -269,25 +291,48 @@ export function findByFTS(
 }
 
 // ---------------------------------------------------------------------------
-// findBySemanticSimilarity - placeholder until sqlite-vec is wired up
+// findBySemanticSimilarity
 // ---------------------------------------------------------------------------
 
 /**
- * Falls back to recency-ordered matches until native sqlite-vec search is wired in.
+ * Searches indexed rows by cosine distance while applying standard filters.
  */
 export function findBySemanticSimilarity(
   db: Database,
-  _embedding: Buffer,
+  embedding: Buffer,
   filters: MemoryFilters,
   limit = 20
 ): MemoryRow[] {
-  // Planned implementation once sqlite-vec is available:
-  //   SELECT m.*, vec_distance_cosine(m.embedding, ?) AS dist
-  //   FROM memories m
-  //   WHERE m.embedding IS NOT NULL
-  //   ORDER BY dist ASC
-  //   LIMIT ?
-  return getValidMemories(db, filters, limit);
+  const { user_id, scope, project_id, agent_id } =
+    MemoryFiltersSchema.parse(filters);
+
+  return withDbError(`running vector search for user '${user_id}'`, () =>
+    db
+      .prepare<unknown[], MemoryRow>(
+        `SELECT m.*
+         FROM memories AS m
+         JOIN memory_vectors AS vectors ON vectors.rowid = m.rowid
+         WHERE m.user_id = ?
+           AND m.invalidated_at IS NULL
+           AND m.valid_until IS NULL
+           AND (? IS NULL OR m.scope = ?)
+           AND (? IS NULL OR m.project_id = ?)
+           AND (? IS NULL OR m.agent_id = ?)
+         ORDER BY vec_distance_cosine(vectors.embedding, ?) ASC
+         LIMIT ?`
+      )
+      .all(
+        user_id,
+        scope ?? null,
+        scope ?? null,
+        project_id ?? null,
+        project_id ?? null,
+        agent_id ?? null,
+        agent_id ?? null,
+        embedding,
+        limit
+      )
+  );
 }
 
 // ---------------------------------------------------------------------------

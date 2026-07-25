@@ -1,0 +1,7 @@
+name: memryon
+kind: exclusive
+version: 0.1.0
+description: Task-aware shared project memory backed by local Memryon.
+author: Memryon contributors
+provides_tools:
+  - record_handoff

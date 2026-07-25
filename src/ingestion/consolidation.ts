@@ -8,7 +8,6 @@ import {
 } from "../db/queries/memories.js";
 import { getProject } from "../db/queries/projects.js";
 import { handleRemember } from "../mcp/tools/remember.js";
-import { resolveByTrustTier } from "../scope/conflict-detection.js";
 import { runStalenessSweep } from "../utils/staleness.js";
 import {
   MemryonError,
@@ -838,7 +837,7 @@ export async function runConsolidationCycle(
 }
 
 /**
- * Records a contradiction by invalidating the older memory, writing the new one, and logging the conflict.
+ * Records both sides of a contradiction and leaves resolution to the user.
  */
 export function handleContradiction(
   db: Database,
@@ -847,19 +846,9 @@ export function handleContradiction(
 ): ConflictLogRow {
   return withDbError(
     `handling contradiction for memory '${existingMemory.id}'`,
-    () => {
+    () => db.transaction(() => {
       const resolvedCandidate = enrichCandidate(db, candidate);
       const decisionConfidence = clampConfidence(candidate.decision_confidence);
-      const validUntil = resolvedCandidate.created_at;
-
-      db.prepare(
-        `UPDATE memories
-         SET valid_until = ?,
-             invalidated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-             invalidated_by = ?
-         WHERE id = ?
-           AND invalidated_at IS NULL`
-      ).run(validUntil, resolvedCandidate.agent_id, existingMemory.id);
 
       const candidateMemoryId = rememberCandidate(
         db,
@@ -867,8 +856,7 @@ export function handleContradiction(
           ...resolvedCandidate,
           project_id: resolvedCandidate.project_id ?? existingMemory.project_id,
         },
-        decisionConfidence,
-        existingMemory.id
+        decisionConfidence
       );
 
       const candidateMemory = getMemoryById(db, candidateMemoryId);
@@ -879,35 +867,15 @@ export function handleContradiction(
         conflictType: candidateMemory.project_id ? "intra_project" : "cross_scope",
       });
 
-      let resolutionStatus: ConflictResolutionStatus = "pending";
-      let resolutionReason: string | null = null;
-      let resolvedBy: string | null = null;
-
-      if (
-        existingMemory.project_id &&
-        candidateMemory.project_id &&
-        existingMemory.project_id === candidateMemory.project_id
-      ) {
-        const resolvedConflict = resolveByTrustTier(db, conflict.id);
-        if (resolvedConflict.resolved_at) {
-          resolutionStatus = "resolved";
-          resolutionReason = resolvedConflict.resolution;
-          resolvedBy = resolvedConflict.resolved_by;
-        } else {
-          resolutionStatus = "flagged";
-          resolutionReason = "trust_tier_tie";
-        }
-      }
-
       return upsertConflictLog(db, {
         conflictId: conflict.id,
         existingMemory,
         candidateMemory,
-        resolutionStatus,
-        resolutionReason,
-        resolvedBy,
+        resolutionStatus: "pending",
+        resolutionReason: "manual_resolution_required",
+        resolvedBy: null,
       });
-    }
+    })()
   );
 }
 

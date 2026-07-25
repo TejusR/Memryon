@@ -243,15 +243,37 @@ describe("handleContradiction", () => {
     });
 
     const logged = db
-      .prepare<[string], { existing_agent_id: string; candidate_agent_id: string }>(
-        `SELECT existing_agent_id, candidate_agent_id
+      .prepare<
+        [string],
+        {
+          existing_agent_id: string;
+          candidate_agent_id: string;
+          resolution_status: string;
+        }
+      >(
+        `SELECT existing_agent_id, candidate_agent_id, resolution_status
          FROM conflict_log
          WHERE id = ?`
       )
       .get(conflict.id);
+    const claims = db
+      .prepare<
+        [string, string],
+        { content: string; invalidated_at: string | null; supersedes: string | null }
+      >(
+        `SELECT content, invalidated_at, supersedes
+         FROM memories
+         WHERE id IN (?, ?)
+         ORDER BY content`
+      )
+      .all(conflict.existing_memory_id, conflict.candidate_memory_id);
 
     expect(logged?.existing_agent_id).toBe(AGENT_PRIMARY);
     expect(logged?.candidate_agent_id).toBe(AGENT_SECONDARY);
+    expect(logged?.resolution_status).toBe("pending");
+    expect(claims).toHaveLength(2);
+    expect(claims.every((claim) => claim.invalidated_at === null)).toBe(true);
+    expect(claims.every((claim) => claim.supersedes === null)).toBe(true);
   });
 });
 

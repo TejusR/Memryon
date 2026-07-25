@@ -124,9 +124,11 @@ afterEach(() => {
 });
 
 describe("OpenClawAdapter", () => {
-  it("maps PostToolUse events to remember calls and project scope when project context is active", async () => {
+  it("maps opt-in PostToolUse events to candidate_buffer without durable memories", async () => {
     const { client, calls } = createMockClient();
-    const adapter = new OpenClawAdapter(db, client);
+    const adapter = new OpenClawAdapter(db, client, {
+      captureToolActivity: true,
+    });
 
     await adapter.onEvent({
       framework: "openclaw",
@@ -137,7 +139,7 @@ describe("OpenClawAdapter", () => {
       projectId: PROJECT_ID,
     });
 
-    await adapter.onEvent({
+    const captured = await adapter.onEvent({
       framework: "openclaw",
       type: "PostToolUse",
       sessionId: "open-session",
@@ -146,11 +148,11 @@ describe("OpenClawAdapter", () => {
       output: { files: ["src/mcp/tools/remember.ts"] },
     });
 
-    expect(calls.remember).toHaveLength(1);
-    expect(calls.remember[0]?.framework).toBe("openclaw");
-    expect(calls.remember[0]?.agent_id).toBe(AGENT);
-    expect(calls.remember[0]?.scope).toBe("project");
-    expect(calls.remember[0]?.project_id).toBe(PROJECT_ID);
+    expect(captured).toMatchObject({
+      status: "buffered",
+      scope: "project",
+    });
+    expect(calls.remember).toHaveLength(0);
 
     const buffered = db
       .prepare<[string, string], { count: number }>(
@@ -198,9 +200,13 @@ describe("HermesAdapter", () => {
 });
 
 describe("ClaudeCodeAdapter", () => {
-  it("injects CLAUDE.md and project_context at session start, then captures tool results", async () => {
+  it("injects CLAUDE.md and project_context, then buffers opt-in tool results", async () => {
     const { client, calls } = createMockClient();
-    const adapter = new ClaudeCodeAdapter(db, {}, client);
+    const adapter = new ClaudeCodeAdapter(
+      db,
+      { captureToolActivity: true },
+      client
+    );
 
     const started = (await adapter.onEvent({
       framework: "claude-code",
@@ -211,7 +217,7 @@ describe("ClaudeCodeAdapter", () => {
       projectId: PROJECT_ID,
     })) as Record<string, string>;
 
-    await adapter.onEvent({
+    const captured = await adapter.onEvent({
       framework: "claude-code",
       type: "PostToolUse",
       sessionId: "claude-session",
@@ -223,8 +229,11 @@ describe("ClaudeCodeAdapter", () => {
     expect(started.injected_context).toContain("CLAUDE.md");
     expect(started.injected_context).toContain("Project Context");
     expect(calls.projectContext).toHaveLength(1);
-    expect(calls.remember[0]?.framework).toBe("claude-code");
-    expect(calls.remember[0]?.scope).toBe("project");
+    expect(captured).toMatchObject({
+      status: "buffered",
+      scope: "project",
+    });
+    expect(calls.remember).toHaveLength(0);
   });
 });
 
@@ -307,8 +316,8 @@ describe("CodexAdapter", () => {
 describe("adapter fault isolation", () => {
   it("logs one adapter failure without blocking another adapter", async () => {
     const failingClient = createMockClient({
-      remember: async () => {
-        throw new Error("remember failed");
+      prepareContext: async () => {
+        throw new Error("context failed");
       },
     }).client;
 
@@ -319,21 +328,13 @@ describe("adapter fault isolation", () => {
       createMockClient().client
     );
 
-    await openClaw.onEvent({
+    const failed = await openClaw.onEvent({
       framework: "openclaw",
-      type: "session.started",
+      type: "agent_turn_prepare",
       sessionId: "faulty-session",
       agentId: AGENT,
       userId: USER,
-    });
-
-    const failed = await openClaw.onEvent({
-      framework: "openclaw",
-      type: "PostToolUse",
-      sessionId: "faulty-session",
-      toolName: "explode",
-      input: {},
-      output: {},
+      prompt: "Load context for this task",
     });
 
     const stored = await hermes.store({
@@ -343,9 +344,11 @@ describe("adapter fault isolation", () => {
 
     const errors = listAdapterErrors(db, "openclaw");
 
-    expect(failed).toBeNull();
+    expect(failed).toMatchObject({
+      prependContext: expect.stringContaining("Memryon warning"),
+    });
     expect(stored?.status).toBe("stored");
     expect(errors).toHaveLength(1);
-    expect(errors[0]?.error).toContain("remember failed");
+    expect(errors[0]?.error).toContain("context failed");
   });
 });

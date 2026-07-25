@@ -1,0 +1,26 @@
+{
+  "id": "memryon",
+  "name": "Memryon",
+  "description": "Injects task-aware shared project memory and records structured handoffs.",
+  "contracts": {
+    "tools": [
+      "record_handoff"
+    ]
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "userId": {
+        "type": "string",
+        "default": "local-user"
+      },
+      "projectId": {
+        "type": "string"
+      }
+    }
+  }
+}

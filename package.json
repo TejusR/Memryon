@@ -2,8 +2,23 @@
   "name": "memryon",
   "version": "0.1.0",
   "description": "Local-first, MCP-native memory operating system for multi-agent AI systems",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "dist/mcp/server.js",
+  "bin": {
+    "memryon": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "integrations",
+    "LICENSE",
+    "README.md"
+  ],
+  "exports": {
+    ".": "./dist/mcp/server.js",
+    "./adapters": "./dist/adapters/index.js",
+    "./langgraph": "./dist/mcp/tools/store-shared.js"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
@@ -16,8 +31,10 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.37.0",
+    "@huggingface/transformers": "4.2.0",
     "@modelcontextprotocol/sdk": "^1.10.2",
     "better-sqlite3": "^11.9.1",
+    "sqlite-vec": "0.1.9",
     "ulid": "^2.3.0",
     "zod": "^3.24.2"
   },

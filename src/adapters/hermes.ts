@@ -2,6 +2,11 @@ import type { Database } from "../db/connection.js";
 import type { ForgetResult } from "../mcp/tools/forget.js";
 import type { RecallResult } from "../mcp/tools/recall.js";
 import type { RememberResult } from "../mcp/tools/remember.js";
+import type { PrepareContextResult } from "../mcp/tools/prepare-context.js";
+import type {
+  RecordHandoffArgs,
+  RecordHandoffResult,
+} from "../mcp/tools/record-handoff.js";
 import {
   BaseFrameworkAdapter,
   createHandlerBackedMemoryClient,
@@ -50,6 +55,8 @@ export interface HermesMemoryBackend {
   store(memory: HermesMemoryInput): Promise<RememberResult | null>;
   retrieve(query: HermesRetrieveQuery): Promise<RecallResult>;
   delete(id: string): Promise<ForgetResult | null>;
+  prepareContext(query: HermesRetrieveQuery): Promise<PrepareContextResult | null>;
+  recordHandoff(args: RecordHandoffArgs): Promise<RecordHandoffResult | null>;
 }
 
 export interface HermesMemoryProviderPlugin {
@@ -170,6 +177,52 @@ export class HermesAdapter
       null
     );
   }
+
+  async prepareContext(
+    query: HermesRetrieveQuery
+  ): Promise<PrepareContextResult | null> {
+    if (this.client.prepareContext === undefined || query.query === undefined) {
+      return null;
+    }
+    const session = this.getSession(query.session_id);
+    const agentId =
+      query.agent_id ?? session?.agentId ?? this.options.defaultAgentId;
+    const userId =
+      query.user_id ?? session?.userId ?? this.options.defaultUserId;
+    const projectId = query.project_id ?? session?.projectId;
+    const sessionId = query.session_id ?? session?.sessionId;
+
+    return this.protect(
+      "prepare_context",
+      () =>
+        this.client.prepareContext!({
+          task: query.query!,
+          user_id: userId,
+          agent_id: agentId,
+          ...(projectId !== undefined ? { project_id: projectId } : {}),
+          ...(sessionId !== undefined ? { session_id: sessionId } : {}),
+          ...(query.top_k !== undefined ? { top_k: query.top_k } : {}),
+        }),
+      null
+    );
+  }
+
+  async recordHandoff(
+    args: RecordHandoffArgs
+  ): Promise<RecordHandoffResult | null> {
+    if (this.client.recordHandoff === undefined) {
+      return null;
+    }
+    return this.protect(
+      "record_handoff",
+      () =>
+        this.client.recordHandoff!({
+          ...args,
+          framework: args.framework ?? "hermes",
+        }),
+      null
+    );
+  }
 }
 
 /**
@@ -185,6 +238,8 @@ export function createHermesMemoryProvider(
       store: (memory) => adapter.store(memory),
       retrieve: (query) => adapter.retrieve(query),
       delete: (id) => adapter.delete(id),
+      prepareContext: (query) => adapter.prepareContext(query),
+      recordHandoff: (args) => adapter.recordHandoff(args),
     },
   };
 }

@@ -27,6 +27,16 @@ import {
   type RememberArgs,
   type RememberResult,
 } from "../mcp/tools/remember.js";
+import {
+  handlePrepareContext,
+  type PrepareContextArgs,
+  type PrepareContextResult,
+} from "../mcp/tools/prepare-context.js";
+import {
+  handleRecordHandoff,
+  type RecordHandoffArgs,
+  type RecordHandoffResult,
+} from "../mcp/tools/record-handoff.js";
 import { MemryonError, errorMessage } from "../utils/errors.js";
 
 export type { CandidateScope };
@@ -45,6 +55,9 @@ export interface AdapterSessionState {
   projectId?: string;
   scope: CandidateScope;
   injectedContext?: string;
+  currentTask?: string;
+  substantiveActivity?: boolean;
+  stopReminderIssued?: boolean;
 }
 
 export interface AdapterSessionStartedEvent {
@@ -65,6 +78,8 @@ export interface MemoryToolClient {
   recall(args: RecallArgs): Promise<RecallResult>;
   forget(args: ForgetArgs): Promise<ForgetResult>;
   projectContext?(args: ProjectContextArgs): Promise<ProjectContextResult>;
+  prepareContext?(args: PrepareContextArgs): Promise<PrepareContextResult>;
+  recordHandoff?(args: RecordHandoffArgs): Promise<RecordHandoffResult>;
 }
 
 export interface BufferAndRememberInput {
@@ -118,6 +133,12 @@ export function createHandlerBackedMemoryClient(db: Database): MemoryToolClient 
     },
     async projectContext(args) {
       return handleProjectContext(db, args);
+    },
+    async prepareContext(args) {
+      return handlePrepareContext(db, args);
+    },
+    async recordHandoff(args) {
+      return handleRecordHandoff(db, args);
     },
   };
 }
@@ -182,6 +203,22 @@ export function createMcpToolClient(caller: ToolCaller): MemoryToolClient {
       return parseToolResult<ProjectContextResult>(
         await caller.callTool({
           name: "project_context",
+          arguments: args as unknown as Record<string, unknown>,
+        })
+      );
+    },
+    async prepareContext(args) {
+      return parseToolResult<PrepareContextResult>(
+        await caller.callTool({
+          name: "prepare_context",
+          arguments: args as unknown as Record<string, unknown>,
+        })
+      );
+    },
+    async recordHandoff(args) {
+      return parseToolResult<RecordHandoffResult>(
+        await caller.callTool({
+          name: "record_handoff",
           arguments: args as unknown as Record<string, unknown>,
         })
       );
@@ -316,6 +353,19 @@ export abstract class BaseFrameworkAdapter<TEvent>
       remembered,
       candidatesBuffered: buffered.candidates_buffered,
     };
+  }
+
+  protected bufferCandidateActivity(input: BufferAndRememberInput): number {
+    const projectId = input.scope === "project" ? input.projectId : undefined;
+    return extractCandidates(
+      this.db,
+      input.content,
+      input.agentId,
+      this.framework,
+      input.sessionId,
+      input.scope,
+      projectId
+    ).candidates_buffered;
   }
 
   protected buildToolMemoryContent(

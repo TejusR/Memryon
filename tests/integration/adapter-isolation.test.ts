@@ -56,9 +56,7 @@ afterEach(() => {
 describe("adapter isolation", () => {
   it("logs a failing adapter error while healthy adapters continue storing and recalling memories", async () => {
     const failingClient: MemoryToolClient = {
-      remember: async () => {
-        throw new Error("simulated remember failure");
-      },
+      remember: async () => ({ memcell_id: "unused", status: "stored" }),
       recall: async () => ({
         results: [],
         scope_breakdown: { project: 0, agent: 0, global: 0 },
@@ -67,6 +65,9 @@ describe("adapter isolation", () => {
         status: "forgotten",
         memcell_id: "unused",
       }),
+      prepareContext: async () => {
+        throw new Error("simulated context failure");
+      },
     };
 
     const openClaw = new OpenClawAdapter(db, failingClient);
@@ -75,22 +76,14 @@ describe("adapter isolation", () => {
       defaultUserId: USER,
     });
 
-    await openClaw.onEvent({
+    const failed = await openClaw.onEvent({
       framework: "openclaw",
-      type: "session.started",
+      type: "agent_turn_prepare",
       sessionId: "faulty-openclaw-session",
       agentId: OPENCLAW,
       userId: USER,
       projectId,
-    });
-
-    const failed = await openClaw.onEvent({
-      framework: "openclaw",
-      type: "PostToolUse",
-      sessionId: "faulty-openclaw-session",
-      toolName: "sync_project_context",
-      input: { project_id: projectId },
-      output: { status: "failed" },
+      prompt: "Synchronize project context",
     });
 
     const stored = await hermes.store({
@@ -113,7 +106,9 @@ describe("adapter isolation", () => {
       .get(HERMES, "hermes");
     const errors = listAdapterErrors(db, "openclaw");
 
-    expect(failed).toBeNull();
+    expect(failed).toMatchObject({
+      prependContext: expect.stringContaining("Memryon warning"),
+    });
     expect(stored?.status).toBe("stored");
     expect(
       recalled.results.some((row) =>
@@ -122,6 +117,6 @@ describe("adapter isolation", () => {
     ).toBe(true);
     expect(persistedCount?.count).toBeGreaterThan(0);
     expect(errors).toHaveLength(1);
-    expect(errors[0]?.error).toContain("simulated remember failure");
+    expect(errors[0]?.error).toContain("simulated context failure");
   });
 });

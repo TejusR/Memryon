@@ -10,6 +10,7 @@ import {
 } from "./graph-traversal.js";
 import type { IntentWeights } from "./router.js";
 import { withDbError } from "../utils/errors.js";
+import { searchMemoryVectors } from "./vector-index.js";
 
 export interface HybridSearchInput {
   userId: string;
@@ -19,6 +20,8 @@ export interface HybridSearchInput {
   query: string;
   intentWeights: IntentWeights;
   limit: number;
+  queryVector?: Float32Array;
+  visibilityLimit?: number;
 }
 
 export interface SearchSourceBreakdown {
@@ -101,43 +104,6 @@ function tokenizeSearch(text: string): string[] {
 
       return [token];
     });
-}
-
-function tokenFrequency(text: string): Map<string, number> {
-  const counts = new Map<string, number>();
-
-  for (const token of tokenizeSearch(text)) {
-    counts.set(token, (counts.get(token) ?? 0) + 1);
-  }
-
-  return counts;
-}
-
-function cosineFromCounts(
-  left: Map<string, number>,
-  right: Map<string, number>
-): number {
-  let dot = 0;
-  let leftNorm = 0;
-  let rightNorm = 0;
-
-  for (const value of left.values()) {
-    leftNorm += value * value;
-  }
-
-  for (const value of right.values()) {
-    rightNorm += value * value;
-  }
-
-  if (leftNorm === 0 || rightNorm === 0) {
-    return 0;
-  }
-
-  for (const [token, value] of left.entries()) {
-    dot += value * (right.get(token) ?? 0);
-  }
-
-  return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
 }
 
 function sortRankedRows(rows: ScoredMemoryRow[]): ScoredMemoryRow[] {
@@ -246,32 +212,18 @@ function runBm25Search(
 }
 
 function runVectorSearch(
+  db: Database,
   visibleRows: ScoredMemoryRow[],
-  query: string,
+  queryVector: Float32Array | undefined,
   limit: number
 ): ScoredMemoryRow[] {
-  const queryCounts = tokenFrequency(query);
-  if (queryCounts.size === 0) {
+  if (queryVector === undefined) {
     return [];
   }
 
-  return visibleRows
-    .map((row) => ({
-      row,
-      similarity: cosineFromCounts(queryCounts, tokenFrequency(row.content)),
-    }))
-    .filter((candidate) => candidate.similarity > 0)
-    .sort((left, right) => {
-      if (right.similarity !== left.similarity) {
-        return right.similarity - left.similarity;
-      }
-      if (left.row.scopePriority !== right.row.scopePriority) {
-        return left.row.scopePriority - right.row.scopePriority;
-      }
-      return right.row.recorded_at.localeCompare(left.row.recorded_at);
-    })
-    .slice(0, limit)
-    .map((candidate) => candidate.row);
+  return searchMemoryVectors(db, queryVector, visibleRows, limit).map(
+    (candidate) => candidate.row
+  );
 }
 
 function aggregateGraphResults(
@@ -353,7 +305,7 @@ export function reciprocalRankFuse(
 }
 
 /**
- * Runs the hybrid Memryon retrieval pipeline across BM25, lexical-vector, and graph signals.
+ * Runs the hybrid Memryon retrieval pipeline across BM25, sqlite-vec, and graph signals.
  */
 export function hybridSearch(
   db: Database,
@@ -365,6 +317,9 @@ export function hybridSearch(
       agentId: input.agentId,
       ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
       ...(input.scope !== undefined ? { scope: input.scope } : {}),
+      ...(input.visibilityLimit !== undefined
+        ? { limitPerScope: input.visibilityLimit }
+        : {}),
     });
 
     if (visibleRows.length === 0) {
@@ -386,7 +341,12 @@ export function hybridSearch(
 
     const sourceLimit = Math.max(input.limit * 3, 10);
     const bm25Rows = runBm25Search(db, input, visibleRowsById, sourceLimit);
-    const vectorRows = runVectorSearch(visibleRows, trimmedQuery, sourceLimit);
+    const vectorRows = runVectorSearch(
+      db,
+      visibleRows,
+      input.queryVector,
+      sourceLimit
+    );
 
     const seedIds = new Set<string>();
     for (const row of [...bm25Rows.slice(0, 5), ...vectorRows.slice(0, 5)]) {
@@ -402,9 +362,27 @@ export function hybridSearch(
       );
     }
 
-    const graphRows = aggregateGraphResults(visibleRowsById, traversedRows)
-      .slice(0, sourceLimit)
-      .map((entry) => entry.row);
+    const graphRows: ScoredMemoryRow[] = [];
+    const graphSeen = new Set<string>();
+    for (const seedId of seedIds) {
+      const seed = visibleRowsById.get(seedId);
+      if (seed !== undefined) {
+        graphRows.push(seed);
+        graphSeen.add(seed.id);
+      }
+    }
+    for (const entry of aggregateGraphResults(
+      visibleRowsById,
+      traversedRows
+    )) {
+      if (!graphSeen.has(entry.row.id)) {
+        graphRows.push(entry.row);
+        graphSeen.add(entry.row.id);
+      }
+      if (graphRows.length >= sourceLimit) {
+        break;
+      }
+    }
 
     const fused = reciprocalRankFuse(visibleRowsById, {
       bm25: bm25Rows,

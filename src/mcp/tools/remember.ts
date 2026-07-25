@@ -7,6 +7,9 @@ import {
   checkCrossScopeConflicts,
 } from "../../scope/conflict-detection.js";
 import { ScopeViolationError } from "../../utils/errors.js";
+import type { JsonObject } from "../../utils/json.js";
+import type { z } from "zod";
+import type { MemoryKindSchema } from "../schemas.js";
 
 // ---------------------------------------------------------------------------
 // Input type (matches MCP tool Zod shape in server.ts)
@@ -26,6 +29,10 @@ export interface RememberArgs {
   supersedes?: string | undefined;
   content_type?: string | undefined;
   tags?: string[] | undefined;
+  memory_kind?: z.infer<typeof MemoryKindSchema> | undefined;
+  task_id?: string | undefined;
+  metadata_json?: JsonObject | undefined;
+  evidence_refs?: string[] | undefined;
 }
 
 export interface RememberResult {
@@ -68,9 +75,13 @@ export function handleRemember(db: Database, args: RememberArgs): RememberResult
     confidence: args.confidence ?? 1,
     importance: args.importance_hint ?? 0.5,
     source_type: args.source_type ?? "manual",
+    memory_kind: args.memory_kind ?? "observation",
+    metadata_json: args.metadata_json ?? {},
+    evidence_refs: args.evidence_refs ?? [],
     ...(args.framework !== undefined ? { framework: args.framework } : {}),
     ...(args.session_id !== undefined ? { session_id: args.session_id } : {}),
     ...(args.supersedes !== undefined ? { supersedes: args.supersedes } : {}),
+    ...(args.task_id !== undefined ? { task_id: args.task_id } : {}),
   };
 
   const insertInput =

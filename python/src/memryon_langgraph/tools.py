@@ -37,10 +37,42 @@ def _tool_defaults(config: MemryonConfig, tool_name: str) -> dict[str, Any]:
         **({"project_id": config.project_id} if config.project_id is not None else {}),
     }
 
-    if tool_name in {"remember"}:
+    if tool_name == "remember":
         return {
             **scoped,
-            "session_id": config.session_id,
+            **(
+                {"session_id": config.session_id}
+                if config.session_id is not None
+                else {}
+            ),
+        }
+    if tool_name == "record_handoff":
+        return {
+            **base,
+            **(
+                {"project_id": config.project_id}
+                if config.project_id is not None
+                else {}
+            ),
+            **(
+                {"session_id": config.session_id}
+                if config.session_id is not None
+                else {}
+            ),
+        }
+    if tool_name == "prepare_context":
+        return {
+            **base,
+            **(
+                {"project_id": config.project_id}
+                if config.project_id is not None
+                else {}
+            ),
+            **(
+                {"session_id": config.session_id}
+                if config.session_id is not None
+                else {}
+            ),
         }
     if tool_name in {"recall", "store_get", "store_search", "store_list_namespaces"}:
         return scoped

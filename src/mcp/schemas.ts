@@ -7,6 +7,18 @@ import type { JsonObject, JsonValue } from "../utils/json.js";
 
 const ScopeSchema = z.enum(["agent", "project", "global"]);
 const NamespaceSchema = z.array(z.string().min(1)).min(1);
+export const MemoryKindSchema = z.enum([
+  "observation",
+  "decision",
+  "constraint",
+  "failure",
+  "outcome",
+  "unresolved_question",
+  "fact",
+  "preference",
+  "procedure",
+  "handoff_summary",
+]);
 
 const RoleSchema = z.enum(["owner", "contributor", "readonly"]).default("contributor");
 
@@ -23,7 +35,7 @@ const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   ])
 );
 
-const JsonObjectSchema: z.ZodType<JsonObject> = z.record(
+export const JsonObjectSchema: z.ZodType<JsonObject> = z.record(
   z.string(),
   JsonValueSchema
 );
@@ -49,6 +61,10 @@ const commonMemoryFields = {
   source_type: z.string().default("manual"),
   embedding: z.instanceof(Buffer).optional(),
   embedding_model_version: z.string().optional(),
+  memory_kind: MemoryKindSchema.default("observation"),
+  task_id: z.string().optional(),
+  metadata_json: JsonObjectSchema.default({}),
+  evidence_refs: z.array(z.string().min(1)).default([]),
 };
 
 /** Validated input for insertMemory. project_id is required iff scope='project'. */

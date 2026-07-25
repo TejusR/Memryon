@@ -2,6 +2,11 @@ import type { Database } from "../db/connection.js";
 import type { ForgetResult } from "../mcp/tools/forget.js";
 import type { RecallResult } from "../mcp/tools/recall.js";
 import type { RememberResult } from "../mcp/tools/remember.js";
+import type { PrepareContextResult } from "../mcp/tools/prepare-context.js";
+import type {
+  RecordHandoffArgs,
+  RecordHandoffResult,
+} from "../mcp/tools/record-handoff.js";
 import {
   BaseFrameworkAdapter,
   createMcpToolClient,
@@ -50,12 +55,43 @@ export interface CodexForgetEvent {
   agentId: string;
 }
 
+export interface CodexPrepareContextEvent {
+  framework: "codex";
+  type: "prepare_context";
+  task: string;
+  sessionId: string;
+  agentId: string;
+  userId: string;
+  projectId?: string;
+  tokenBudget?: number;
+  topK?: number;
+}
+
+export interface CodexRecordHandoffEvent {
+  framework: "codex";
+  type: "record_handoff";
+  task: string;
+  summary: string;
+  sessionId: string;
+  agentId: string;
+  userId: string;
+  projectId?: string;
+  decisions?: string[];
+  constraints?: string[];
+  failures?: string[];
+  outcomes?: string[];
+  unresolvedQuestions?: string[];
+  evidenceRefs?: string[];
+}
+
 export type CodexEvent =
   | CodexSessionStartedEvent
   | CodexSessionEndedEvent
   | CodexRememberEvent
   | CodexRecallEvent
-  | CodexForgetEvent;
+  | CodexForgetEvent
+  | CodexPrepareContextEvent
+  | CodexRecordHandoffEvent;
 
 function isCodexEvent(event: unknown): event is CodexEvent {
   if (typeof event !== "object" || event === null) {
@@ -69,7 +105,9 @@ function isCodexEvent(event: unknown): event is CodexEvent {
       value.type === "session.ended" ||
       value.type === "remember" ||
       value.type === "recall" ||
-      value.type === "forget")
+      value.type === "forget" ||
+      value.type === "prepare_context" ||
+      value.type === "record_handoff")
   );
 }
 
@@ -138,6 +176,70 @@ export class CodexAdapter extends BaseFrameworkAdapter<CodexEvent> {
     );
   }
 
+  async prepareContext(
+    event: CodexPrepareContextEvent
+  ): Promise<PrepareContextResult | null> {
+    if (this.client.prepareContext === undefined) {
+      return null;
+    }
+    return this.protect(
+      "prepare_context",
+      () =>
+        this.client.prepareContext!({
+          task: event.task,
+          user_id: event.userId,
+          agent_id: event.agentId,
+          session_id: event.sessionId,
+          ...(event.projectId !== undefined
+            ? { project_id: event.projectId }
+            : {}),
+          ...(event.tokenBudget !== undefined
+            ? { token_budget: event.tokenBudget }
+            : {}),
+          ...(event.topK !== undefined ? { top_k: event.topK } : {}),
+        }),
+      null
+    );
+  }
+
+  async recordHandoff(
+    event: CodexRecordHandoffEvent
+  ): Promise<RecordHandoffResult | null> {
+    if (this.client.recordHandoff === undefined) {
+      return null;
+    }
+    const args: RecordHandoffArgs = {
+      task: event.task,
+      summary: event.summary,
+      user_id: event.userId,
+      agent_id: event.agentId,
+      session_id: event.sessionId,
+      framework: "codex",
+      ...(event.projectId !== undefined
+        ? { project_id: event.projectId }
+        : {}),
+      ...(event.decisions !== undefined
+        ? { decisions: event.decisions }
+        : {}),
+      ...(event.constraints !== undefined
+        ? { constraints: event.constraints }
+        : {}),
+      ...(event.failures !== undefined ? { failures: event.failures } : {}),
+      ...(event.outcomes !== undefined ? { outcomes: event.outcomes } : {}),
+      ...(event.unresolvedQuestions !== undefined
+        ? { unresolved_questions: event.unresolvedQuestions }
+        : {}),
+      ...(event.evidenceRefs !== undefined
+        ? { evidence_refs: event.evidenceRefs }
+        : {}),
+    };
+    return this.protect(
+      "record_handoff",
+      () => this.client.recordHandoff!(args),
+      null
+    );
+  }
+
   protected async handleEvent(event: CodexEvent): Promise<unknown> {
     if (event.type === "session.started") {
       const session = this.createSession(event);
@@ -168,6 +270,14 @@ export class CodexAdapter extends BaseFrameworkAdapter<CodexEvent> {
 
     if (event.type === "recall") {
       return this.recall(event);
+    }
+
+    if (event.type === "prepare_context") {
+      return this.prepareContext(event);
+    }
+
+    if (event.type === "record_handoff") {
+      return this.recordHandoff(event);
     }
 
     return this.forget(event);

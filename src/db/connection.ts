@@ -1,5 +1,8 @@
 import Database from "better-sqlite3";
-import { initSchema } from "./schema.js";
+import * as sqliteVec from "sqlite-vec";
+import { mkdirSync } from "node:fs";
+import path from "node:path";
+import { runMigrations } from "./migrations.js";
 import { withDbError } from "../utils/errors.js";
 
 export type { Database } from "better-sqlite3";
@@ -16,6 +19,9 @@ export function getDb(dbPath: string): Database.Database {
   }
 
   return withDbError(`opening database '${dbPath}'`, () => {
+    if (dbPath !== ":memory:") {
+      mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
+    }
     const db = new Database(dbPath);
 
     // WAL mode: concurrent reads with serialized writes
@@ -30,8 +36,11 @@ export function getDb(dbPath: string): Database.Database {
     // Safer writes without a full sync on every transaction
     db.pragma("synchronous = NORMAL");
 
-    // Initialize schema on first open
-    initSchema(db);
+    // Load sqlite-vec before migrations create vector virtual tables.
+    sqliteVec.load(db);
+
+    // Initialize or migrate the schema on every open.
+    runMigrations(db);
 
     connections.set(dbPath, db);
     return db;
